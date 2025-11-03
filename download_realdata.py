@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 국토부 실거래가 데이터 월별 대량 다운로드
-- 이미 다운로드된 파일 자동 스킵
-- 진행 상황 저장 (중단 후 재개 가능)
-- 다운로드 제한(100건/일) 대응
+- 재시도 로직 (15초 대기, 최대 3회)
+- 진행 상황 저장 및 재개
+- 100회 제한 대응 (다음날 자동 재개)
+- 업데이트 모드 (최근 1년만 갱신)
 """
 import os
 import re
@@ -20,15 +21,34 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.alert import Alert
-from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import UnexpectedAlertPresentException
 
-from config import DOWNLOAD_DIR, TEMP_DOWNLOAD_DIR, MOLIT_URL, PROPERTY_TYPES
+# ==================== 설정 ====================
+# 저장 폴더 (OneDrive 경로)
+DOWNLOAD_DIR = Path(r"D:\OneDrive\office work\부동산 실거래 데이터")
+
+# 임시 다운로드 폴더
+TEMP_DOWNLOAD_DIR = Path("_temp_downloads")
+
+# 국토부 URL
+MOLIT_URL = "https://rt.molit.go.kr/new/gis/srh.do?menuGubun=A&xls=xls.do"
+
+# 부동산 종목 (8개)
+PROPERTY_TYPES = [
+    "아파트",
+    "연립다세대",
+    "단독다가구",
+    "오피스텔",
+    "토지",
+    "상업업무용",
+    "분양권",
+    "입주권"
+]
 
 # 진행 상황 파일
 PROGRESS_FILE = Path("download_progress.json")
 
-# 임시 다운로드 폴더
+# 임시 다운로드 폴더 생성
 TEMP_DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 IS_CI = os.getenv("CI", "") == "1"
@@ -160,7 +180,7 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
         start_val = start_date.isoformat()
         end_val = end_date.isoformat()
         
-        # JavaScript로 강제 입력 (가장 확실)
+        # JavaScript로 강제 입력
         driver.execute_script("""
             arguments[0].value = arguments[1];
             arguments[0].dispatchEvent(new Event('input', {bubbles:true}));
@@ -194,7 +214,6 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
 def click_excel_download(driver) -> bool:
     """EXCEL 다운 버튼 클릭"""
     try:
-        # 버튼 찾기
         btn = driver.find_element(
             By.XPATH,
             "//button[contains(text(), 'EXCEL 다운')]"
@@ -211,13 +230,12 @@ def click_excel_download(driver) -> bool:
         return False
 
 
-def wait_for_download(timeout: int = 60) -> Optional[Path]:
-    """다운로드 완료 대기 - 개선된 버전"""
+def wait_for_download(timeout: int = 15) -> Optional[Path]:
+    """다운로드 완료 대기 - 15초 제한"""
     start_time = time.time()
     baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
     
-    log(f"  ⏳ 다운로드 대기 중... (폴더: {TEMP_DOWNLOAD_DIR})")
-    log(f"  📊 기존 파일 수: {len(baseline_files)}")
+    log(f"  ⏳ 다운로드 대기 중... (최대 {timeout}초)")
     
     found_crdownload = False
     
@@ -231,50 +249,36 @@ def wait_for_download(timeout: int = 60) -> Optional[Path]:
         crdownloads = [f for f in current_files if f.suffix == '.crdownload']
         if crdownloads:
             found_crdownload = True
-            if elapsed % 3 == 0:  # 3초마다 로그
+            if elapsed % 3 == 0:
                 sizes = [f.stat().st_size for f in crdownloads]
-                log(f"  ⏳ 다운로드 진행 중... ({elapsed}초, {sizes[0]:,} bytes)")
+                log(f"  ⏳ 진행중... ({elapsed}초, {sizes[0]:,} bytes)")
             time.sleep(0.5)
             continue
         
-        # .crdownload가 사라진 직후 - 새 파일 찾기
-        if found_crdownload or elapsed > 3:
-            # 엑셀 파일 찾기 (다양한 패턴)
+        # 새 파일 찾기
+        if found_crdownload or elapsed > 2:
             excel_files = [
                 f for f in current_files 
                 if f.is_file() and f.suffix.lower() in ['.xls', '.xlsx']
-                and f not in baseline_files  # 새로 생성된 파일만
+                and f not in baseline_files
             ]
             
             if excel_files:
-                # 가장 최근 파일
                 latest = max(excel_files, key=lambda p: p.stat().st_mtime)
                 size = latest.stat().st_size
                 
-                # 파일 크기 안정화 대기 (파일이 완전히 기록될 때까지)
                 if size > 0:
-                    time.sleep(1)  # 추가 대기
+                    time.sleep(0.5)  # 안정화 대기
                     new_size = latest.stat().st_size
                     
-                    if new_size == size and size > 1000:  # 크기 변화 없고 최소 크기 이상
+                    if new_size == size and size > 1000:
                         log(f"  ✅ 다운로드 완료: {latest.name} ({size:,} bytes)")
                         return latest
-                    elif new_size != size:
-                        log(f"  📝 파일 쓰기 중... ({new_size:,} bytes)")
         
-        time.sleep(0.5)
+        time.sleep(0.3)
     
-    # 타임아웃 시 상세 진단
-    log(f"  ❌ 다운로드 시간 초과 ({timeout}초)")
-    log(f"  🔍 다운로드 상태:")
-    log(f"     - .crdownload 감지 여부: {found_crdownload}")
-    
-    all_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
-    log(f"  📁 현재 폴더 내용 ({len(all_files)}개):")
-    for f in all_files:
-        is_new = "🆕" if f not in baseline_files else "📄"
-        log(f"     {is_new} {f.name} ({f.stat().st_size:,} bytes)")
-    
+    # 타임아웃
+    log(f"  ⏱️  타임아웃 ({timeout}초)")
     return None
 
 
@@ -345,8 +349,24 @@ def is_already_downloaded(property_type: str, year: int, month: int) -> bool:
     return dest_path.exists()
 
 
-def download_single_month(driver, property_type: str, start_date: date, end_date: date) -> bool:
-    """단일 월 다운로드"""
+def check_if_all_historical_complete(progress: dict) -> bool:
+    """모든 과거 데이터가 완료되었는지 확인 (2006-01 ~ 작년 12월)"""
+    last_year = date.today().year - 1
+    last_historical_month = f"{last_year}12"
+    
+    for prop in PROPERTY_TYPES:
+        prop_key = sanitize_folder_name(prop)
+        last_month = progress.get(prop_key, {}).get("last_month", "")
+        
+        # 작년 12월까지 완료되지 않았으면 False
+        if not last_month or last_month < last_historical_month:
+            return False
+    
+    return True
+
+
+def download_single_month_with_retry(driver, property_type: str, start_date: date, end_date: date, max_retries: int = 3) -> bool:
+    """단일 월 다운로드 - 재시도 포함"""
     year = start_date.year
     month = start_date.month
     
@@ -359,69 +379,103 @@ def download_single_month(driver, property_type: str, start_date: date, end_date
         log(f"  ⏭️  이미 존재함, 스킵")
         return True
     
-    # 날짜 설정
-    if not set_dates(driver, start_date, end_date):
-        return False
+    # 재시도 로직
+    for attempt in range(1, max_retries + 1):
+        log(f"  🔄 시도 {attempt}/{max_retries}")
+        
+        # 날짜 설정
+        if not set_dates(driver, start_date, end_date):
+            if attempt < max_retries:
+                log(f"  ⏳ 15초 대기 후 재시도...")
+                time.sleep(15)
+                continue
+            return False
+        
+        # 다운로드 클릭
+        if not click_excel_download(driver):
+            if attempt < max_retries:
+                log(f"  ⏳ 15초 대기 후 재시도...")
+                time.sleep(15)
+                continue
+            return False
+        
+        # 다운로드 대기 (15초)
+        downloaded = wait_for_download(timeout=15)
+        
+        if downloaded:
+            # 성공! 이동 및 이름 변경
+            try:
+                move_and_rename_file(downloaded, property_type, year, month)
+                return True
+            except Exception as e:
+                log(f"  ❌ 파일 이동 실패: {e}")
+                if attempt < max_retries:
+                    log(f"  ⏳ 15초 대기 후 재시도...")
+                    time.sleep(15)
+                    continue
+                return False
+        else:
+            # 실패
+            if attempt < max_retries:
+                log(f"  ⏳ 15초 대기 후 재시도...")
+                time.sleep(15)
+            else:
+                log(f"  ❌ {max_retries}회 시도 모두 실패")
+                return False
     
-    # 다운로드 클릭
-    if not click_excel_download(driver):
-        return False
-    
-    # 다운로드 대기 (타임아웃 60초로 증가)
-    downloaded = wait_for_download(timeout=60)
-    if not downloaded:
-        return False
-    
-    # 이동 및 이름 변경
-    try:
-        move_and_rename_file(downloaded, property_type, year, month)
-        return True
-    except Exception as e:
-        log(f"  ❌ 파일 이동 실패: {e}")
-        return False
+    return False
 
 
 def main():
     """메인 함수"""
-    # 명령행 인자 파싱
     parser = argparse.ArgumentParser()
-    parser.add_argument("--test-mode", action="store_true", help="테스트 모드 (제한된 다운로드)")
-    parser.add_argument("--max-months", type=int, default=2, help="테스트 모드에서 최대 다운로드 개월 수")
-    parser.add_argument("--property", type=str, default=None, help="특정 부동산 종목만 다운로드")
+    parser.add_argument("--test-mode", action="store_true", help="테스트 모드")
+    parser.add_argument("--update-mode", action="store_true", help="업데이트 모드 (최근 1년만)")
     args = parser.parse_args()
     
     log("="*70)
-    if args.test_mode:
-        log("🧪 테스트 모드 (제한된 다운로드)")
-        log(f"📊 최대 개월 수: {args.max_months}")
-    else:
-        log("🚀 국토부 실거래가 데이터 다운로드 시작")
+    log("🚀 국토부 실거래가 데이터 다운로드")
     log("="*70)
     log(f"📂 저장 경로: {DOWNLOAD_DIR}")
-    
-    # 종목 필터링
-    if args.property:
-        properties_to_download = [p for p in PROPERTY_TYPES if args.property in p]
-        log(f"📊 다운로드 종목: {properties_to_download}")
-    else:
-        properties_to_download = PROPERTY_TYPES
-        log(f"📊 종목 수: {len(properties_to_download)}")
-    
+    log(f"📊 종목 수: {len(PROPERTY_TYPES)}")
     log("")
     
     # 진행 상황 로드
     progress = load_progress()
     
-    # 월별 날짜 생성
-    monthly_dates = generate_monthly_dates(2006, 1)
-    total_months = len(monthly_dates)
-    
-    # 테스트 모드: 최근 N개월만
-    if args.test_mode:
-        monthly_dates = monthly_dates[-args.max_months:]
-        log(f"📅 테스트 다운로드 기간: {len(monthly_dates)}개월")
+    # 모드 결정
+    if args.update_mode:
+        # 강제 업데이트 모드
+        update_mode = True
+        log("🔄 업데이트 모드: 최근 1년치만 갱신")
     else:
-        log(f"📅 총 다운로드 기간: {total_months}개월 (2006-01 ~ {date.today().strftime('%Y-%m')})")
+        # 자동 판단
+        update_mode = check_if_all_historical_complete(progress)
+        if update_mode:
+            log("✅ 과거 데이터 완료 확인")
+            log("🔄 업데이트 모드로 전환: 최근 1년치만 갱신")
+        else:
+            log("📥 전체 다운로드 모드: 2006-01부터 현재까지")
+    
+    log("")
+    
+    # 날짜 범위 생성
+    if update_mode:
+        # 최근 1년 (13개월 - 여유있게)
+        today = date.today()
+        start_year = today.year - 1
+        start_month = today.month
+        monthly_dates = generate_monthly_dates(start_year, start_month)
+        log(f"📅 다운로드 기간: {start_year}-{start_month:02d} ~ {today.strftime('%Y-%m')} ({len(monthly_dates)}개월)")
+    else:
+        # 전체 기간
+        monthly_dates = generate_monthly_dates(2006, 1)
+        log(f"📅 다운로드 기간: 2006-01 ~ {date.today().strftime('%Y-%m')} ({len(monthly_dates)}개월)")
+    
+    # 테스트 모드
+    if args.test_mode:
+        monthly_dates = monthly_dates[-2:]
+        log(f"🧪 테스트 모드: 최근 {len(monthly_dates)}개월만")
     
     log("")
     
@@ -435,10 +489,14 @@ def main():
         try_accept_alert(driver, 2.0)
         log("✅ 접속 완료\n")
         
+        # 전체 통계
+        total_success = 0
+        total_fail = 0
+        
         # 각 부동산 종목별로
-        for prop_idx, property_type in enumerate(properties_to_download, 1):
+        for prop_idx, property_type in enumerate(PROPERTY_TYPES, 1):
             log("="*70)
-            log(f"📊 [{prop_idx}/{len(properties_to_download)}] {property_type}")
+            log(f"📊 [{prop_idx}/{len(PROPERTY_TYPES)}] {property_type}")
             log("="*70)
             
             # 탭 선택
@@ -456,23 +514,26 @@ def main():
             # 각 월별로
             success_count = 0
             fail_count = 0
+            consecutive_fails = 0
             
             for month_idx, (start_date, end_date) in enumerate(monthly_dates, 1):
                 year = start_date.year
                 month = start_date.month
                 month_key = f"{year:04d}{month:02d}"
                 
-                # 이미 완료한 달 스킵 (테스트 모드가 아닐 때만)
-                if not args.test_mode and last_completed and month_key <= last_completed:
+                # 이미 완료한 달 스킵
+                if last_completed and month_key <= last_completed:
                     continue
                 
                 log(f"\n[{month_idx}/{len(monthly_dates)}]", end=" ")
                 
-                # 다운로드 시도
-                success = download_single_month(driver, property_type, start_date, end_date)
+                # 다운로드 시도 (최대 3회 재시도)
+                success = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3)
                 
                 if success:
                     success_count += 1
+                    consecutive_fails = 0
+                    
                     # 진행 상황 저장
                     if prop_key not in progress:
                         progress[prop_key] = {}
@@ -481,30 +542,35 @@ def main():
                     save_progress(progress)
                 else:
                     fail_count += 1
-                    log(f"⚠️  실패 카운트: {fail_count}")
+                    consecutive_fails += 1
+                    log(f"⚠️  실패 카운트: {fail_count} (연속: {consecutive_fails})")
                     
-                    # 테스트 모드가 아닐 때만 자동 중단
-                    if not args.test_mode and fail_count >= 3:
-                        log(f"\n⛔ 연속 {fail_count}회 실패 - 다운로드 제한 가능성")
+                    # 연속 3회 실패 시 중단 (100회 제한 가능성)
+                    if consecutive_fails >= 3:
+                        log(f"\n⛔ 연속 {consecutive_fails}회 실패 - 다운로드 제한 가능성")
                         log(f"💾 진행 상황 저장됨: {PROGRESS_FILE}")
                         log(f"📌 다음 실행시 {month_key}부터 재개됩니다")
+                        log(f"⏰ 100회 제한일 경우 내일 다시 실행하세요")
+                        driver.quit()
                         return
                 
-                # 다음 요청 전 대기 (서버 부하 방지)
+                # 다음 요청 전 대기
                 time.sleep(2)
             
-            log(f"\n✅ {property_type} 완료: 성공 {success_count}, 실패 {fail_count}\n")
+            log(f"\n✅ {property_type} 완료: 성공 {success_count}, 실패 {fail_count}")
+            total_success += success_count
+            total_fail += fail_count
             
-            # 테스트 모드: 첫 번째 종목만 테스트
+            # 테스트 모드: 첫 종목만
             if args.test_mode:
-                log("🧪 테스트 모드 - 첫 번째 종목만 완료")
+                log("\n🧪 테스트 모드 - 첫 종목만 완료")
                 break
+            
+            log("")
         
         log("="*70)
-        if args.test_mode:
-            log("🧪 테스트 완료!")
-        else:
-            log("🎉 모든 다운로드 완료!")
+        log("🎉 다운로드 완료!")
+        log(f"📊 전체 통계: 성공 {total_success}, 실패 {total_fail}")
         log("="*70)
         
     except KeyboardInterrupt:
