@@ -1,9 +1,16 @@
 # -*- coding: utf-8 -*-
 """설정 파일"""
+import os
 from pathlib import Path
 
-# 다운로드 경로 (Windows 경로)
-DOWNLOAD_DIR = Path(r"C:\Users\USER\OneDrive\office work\부동산 실거래 데이터")
+# GitHub Actions 여부
+IS_CI = os.getenv("CI", "") == "1"
+
+# 다운로드 경로
+if IS_CI:
+    DOWNLOAD_DIR = Path("./output")
+else:
+    DOWNLOAD_DIR = Path(r"C:\Users\USER\OneDrive\office work\부동산 실거래 데이터")
 
 # 임시 다운로드 폴더
 TEMP_DOWNLOAD_DIR = Path("./_rt_downloads")
@@ -24,6 +31,6 @@ PROPERTY_TYPES = [
 ]
 
 # 타임아웃 설정
-DOWNLOAD_TIMEOUT = 30  # 초
+DOWNLOAD_TIMEOUT = 30
 CLICK_RETRY_MAX = 15
-CLICK_RETRY_WAIT = 1.0  # 초
+CLICK_RETRY_WAIT = 1.0
