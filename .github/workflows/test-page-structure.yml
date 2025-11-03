@@ -1,0 +1,51 @@
+name: Test Page Structure
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  explore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    env:
+      CI: "1"
+      PYTHONUNBUFFERED: "1"
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Install Chromium & Chromedriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser chromium-chromedriver
+          echo "CHROME_BIN=/usr/bin/chromium-browser" >> $GITHUB_ENV
+          echo "CHROMEDRIVER_BIN=/usr/bin/chromedriver" >> $GITHUB_ENV
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+      
+      - name: Explore page structure
+        run: |
+          python test_page_structure.py 2>&1 | tee structure_output.log
+      
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: page-structure
+          path: |
+            structure_output.log
+            screenshots/page_structure.png
+            page_sources/page_structure.html
+          retention-days: 7
