@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-탭 선택 테스트 스크립트 (GitHub Actions 대응 + 상세 디버깅)
-- 각 부동산 종목 탭을 순서대로 클릭
-- 스크린샷, 페이지 소스, 상세 로그 저장
+탭 선택 테스트 스크립트 (수정: Alert 처리 + URL 유지)
 """
 import os
 import time
 import sys
+import re
 from pathlib import Path
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.alert import Alert
+from selenium.common.exceptions import UnexpectedAlertPresentException
 
 from config import MOLIT_URL, PROPERTY_TYPES
 
@@ -38,6 +39,28 @@ def log(msg: str, level="INFO"):
     print(f"[{timestamp}] {prefix} {msg}", flush=True)
 
 
+def sanitize_filename(name: str) -> str:
+    """파일명에서 특수문자 제거"""
+    return re.sub(r'[<>:"/\\|?*]', '_', name)
+
+
+def try_accept_alert(driver, timeout=3.0) -> bool:
+    """Alert 자동 수락"""
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        try:
+            alert = Alert(driver)
+            text = alert.text
+            log(f"  🔔 Alert 발견: {text}", "WARNING")
+            alert.accept()
+            log(f"  ✓ Alert 수락됨", "DEBUG")
+            time.sleep(0.5)
+            return True
+        except:
+            time.sleep(0.2)
+    return False
+
+
 def build_driver():
     """크롬 드라이버 생성"""
     log("크롬 드라이버 생성 중...", "DEBUG")
@@ -57,7 +80,6 @@ def build_driver():
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
     
-    # CI 환경: 환경변수로 지정된 chromedriver 사용
     chromedriver_bin = os.getenv("CHROMEDRIVER_BIN")
     if chromedriver_bin and Path(chromedriver_bin).exists():
         log(f"  - Chromedriver: {chromedriver_bin}", "DEBUG")
@@ -79,8 +101,10 @@ def build_driver():
 
 def save_screenshot(driver, name: str):
     """스크린샷 저장"""
-    filepath = SCREENSHOT_DIR / f"{name}.png"
+    safe_name = sanitize_filename(name)
+    filepath = SCREENSHOT_DIR / f"{safe_name}.png"
     try:
+        try_accept_alert(driver, 0.5)
         driver.save_screenshot(str(filepath))
         log(f"  📸 스크린샷 저장: {filepath}", "DEBUG")
     except Exception as e:
@@ -89,7 +113,8 @@ def save_screenshot(driver, name: str):
 
 def save_page_source(driver, name: str):
     """페이지 소스 저장"""
-    filepath = PAGE_SOURCE_DIR / f"{name}.html"
+    safe_name = sanitize_filename(name)
+    filepath = PAGE_SOURCE_DIR / f"{safe_name}.html"
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(driver.page_source)
@@ -98,11 +123,24 @@ def save_page_source(driver, name: str):
         log(f"  페이지 소스 저장 실패: {e}", "ERROR")
 
 
+def reset_to_xls_page(driver):
+    """Excel 다운로드 페이지로 복귀"""
+    current = driver.current_url
+    if "xls.do" not in current:
+        log(f"  🔄 페이지 복귀: {current} → xls.do", "DEBUG")
+        driver.get(MOLIT_URL)
+        time.sleep(2)
+        try_accept_alert(driver, 2.0)
+
+
 def find_and_click_tab(driver, tab_name: str, index: int) -> bool:
     """
     탭 메뉴에서 특정 종목 클릭
     """
     log(f"탭 클릭 시도: {tab_name}", "INFO")
+    
+    # XLS 페이지에 있는지 확인
+    reset_to_xls_page(driver)
     
     # 현재 상태 저장
     save_screenshot(driver, f"{index:02d}_before_{tab_name}")
@@ -145,9 +183,17 @@ def find_and_click_tab(driver, tab_name: str, index: int) -> bool:
                         time.sleep(0.3)
                         
                         # 클릭
-                        elem.click()
+                        try:
+                            elem.click()
+                        except UnexpectedAlertPresentException:
+                            try_accept_alert(driver, 2.0)
+                            elem.click()
+                        
                         log(f"  ✅ 클릭 성공! (방법 {method_idx}, 요소 #{elem_idx})", "SUCCESS")
                         time.sleep(1.5)
+                        
+                        # Alert 처리
+                        try_accept_alert(driver, 2.0)
                         
                         # 클릭 후 상태 저장
                         save_screenshot(driver, f"{index:02d}_after_{tab_name}")
@@ -176,7 +222,6 @@ def get_current_tab_info(driver) -> dict:
     }
     
     try:
-        # 활성화된 탭 찾기
         active_selectors = [
             "//li[contains(@class, 'active')]//a",
             "//a[contains(@class, 'active')]",
@@ -211,6 +256,7 @@ def test_all_tabs():
         log(f"📍 접속: {MOLIT_URL}", "INFO")
         driver.get(MOLIT_URL)
         time.sleep(3)
+        try_accept_alert(driver, 2.0)
         
         info = get_current_tab_info(driver)
         log(f"📋 URL: {info['url']}", "INFO")
@@ -233,7 +279,6 @@ def test_all_tabs():
             
             if success:
                 info = get_current_tab_info(driver)
-                log(f"  📌 현재 활성 탭: {info['active_tab']}", "INFO")
                 log(f"  📌 현재 URL: {info['url']}", "INFO")
             
             time.sleep(2)
@@ -257,7 +302,6 @@ def test_all_tabs():
         save_screenshot(driver, "99_final")
         save_page_source(driver, "99_final")
         
-        # 종료 코드
         if success_count == total_count:
             log("✅ 모든 탭 클릭 성공!", "SUCCESS")
             return 0
@@ -270,7 +314,6 @@ def test_all_tabs():
         import traceback
         traceback.print_exc()
         
-        # 오류 시 상태 저장
         try:
             save_screenshot(driver, "error")
             save_page_source(driver, "error")
