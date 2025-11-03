@@ -34,10 +34,10 @@ TEMP_DOWNLOAD_DIR.mkdir(exist_ok=True)
 IS_CI = os.getenv("CI", "") == "1"
 
 
-def log(msg: str, end="\n"):
+def log(msg: str):
     """로그 출력"""
     timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] {msg}", end=end, flush=True)
+    print(f"[{timestamp}] {msg}", flush=True)
 
 
 def sanitize_folder_name(name: str) -> str:
@@ -214,26 +214,57 @@ def click_excel_download(driver) -> bool:
 def wait_for_download(timeout: int = 30) -> Optional[Path]:
     """다운로드 완료 대기"""
     start_time = time.time()
+    last_files = set()
+    
+    log(f"  ⏳ 다운로드 대기 중... (폴더: {TEMP_DOWNLOAD_DIR})")
     
     while time.time() - start_time < timeout:
+        elapsed = int(time.time() - start_time)
+        
+        # 현재 폴더의 모든 파일
+        current_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
+        
         # .crdownload 파일 확인
         crdownloads = list(TEMP_DOWNLOAD_DIR.glob("*.crdownload"))
         if crdownloads:
-            log(f"  ⏳ 다운로드 중...")
-            time.sleep(2)
+            if elapsed % 5 == 0:  # 5초마다 로그
+                log(f"  ⏳ 다운로드 진행 중... ({elapsed}초)")
+            time.sleep(1)
             continue
         
-        # .xlsx 파일 확인
-        xlsx_files = list(TEMP_DOWNLOAD_DIR.glob("*.xlsx"))
-        if xlsx_files:
+        # .xls, .xlsx 파일 확인 (확장자 대소문자 무시)
+        excel_files = [
+            p for p in current_files 
+            if p.is_file() and p.suffix.lower() in ['.xls', '.xlsx']
+        ]
+        
+        if excel_files:
             # 가장 최근 파일
-            latest = max(xlsx_files, key=lambda p: p.stat().st_mtime)
-            log(f"  ✅ 다운로드 완료: {latest.name}")
-            return latest
+            latest = max(excel_files, key=lambda p: p.stat().st_mtime)
+            
+            # 파일 크기 확인 (0바이트 아닌지)
+            size = latest.stat().st_size
+            if size > 0:
+                log(f"  ✅ 다운로드 완료: {latest.name} ({size:,} bytes)")
+                return latest
+            else:
+                log(f"  ⚠️  파일 크기 0: {latest.name}")
+        
+        # 새 파일 감지 로그
+        new_files = current_files - last_files
+        if new_files:
+            for f in new_files:
+                log(f"  📄 새 파일 감지: {f.name}")
+        last_files = current_files
         
         time.sleep(1)
     
+    # 타임아웃 시 폴더 내용 출력
     log(f"  ❌ 다운로드 시간 초과 ({timeout}초)")
+    log(f"  📁 폴더 내용:")
+    for f in TEMP_DOWNLOAD_DIR.glob("*"):
+        log(f"     - {f.name} ({f.stat().st_size:,} bytes)")
+    
     return None
 
 
