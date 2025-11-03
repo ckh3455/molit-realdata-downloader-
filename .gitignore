@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# 다운로드 파일
+output/
+_rt_downloads/
+*.xlsx
+*.xls
+*.csv
+
+# 크롬 프로필
+chrome_prof_*
+
+# 로그
+*.log
+
+# 설정
+.env
+sa.json
+
+# OS
+.DS_Store
+Thumbs.db
+```
