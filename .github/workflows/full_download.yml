@@ -1,0 +1,107 @@
+name: Real Estate Full Download (Self-hosted)
+
+1. 스케줄 실행 (매일 새벽 2시 15분) - 다운로드 제한 100건 대응
+
+on:
+schedule:
+# 한국 시간 기준 새벽 2시 15분 (UTC 17시 15분)
+# 이 시간에 스크립트가 실행되어 어제 100건 제한에 걸렸다면 이어서 다운로드를 재개합니다.
+- cron: '15 17 * * *'
+
+2. 수동 실행을 위한 설정 (모드 선택 가능)
+
+workflow_dispatch:
+inputs:
+mode:
+description: '실행 모드 선택: full (전체 다운로드), update (최근 1년 갱신)'
+required: true
+default: 'full'
+type: choice
+options:
+- full
+- update
+
+permissions:
+contents: read
+
+jobs:
+full-download:
+# 🚨 실행 환경: Self-hosted Runner를 사용하도록 지정합니다.
+runs-on: self-hosted
+timeout-minutes: 90 # 충분한 실행 시간 부여
+
+env:
+  CI: "1"
+  PYTHONUNBUFFERED: "1"
+  
+steps:
+  - name: Checkout Repository
+    uses: actions/checkout@v4
+    
+  # 1. PowerShell 실행 정책 우회 (PowerShell 스크립트 실행 오류 해결)
+  - name: Set Execution Policy Bypass for Scripts
+    shell: powershell
+    run: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+  # 2. Python 환경 설정
+  - name: Set up Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: "3.11"
+      
+  # 3. Python 의존성 설치
+  - name: Install dependencies
+    run: |
+      pip install -r requirements.txt
+      
+  # 4. 다운로드 실행 (모드에 따라 명령 변경)
+  - name: Run Data Downloader
+    id: downloader
+    shell: powershell
+    run: |
+      $mode = "${{ github.event.inputs.mode }}"
+      $command = "python download_realdata.py 2>&1 | Out-File download_log.txt -Encoding utf8"
+
+      if ($mode -eq 'update') {
+          $command = "python download_realdata.py --update-mode 2>&1 | Out-File download_log.txt -Encoding utf8"
+          echo "mode=Update" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          echo "Starting update mode: last 1 year data."
+      } else {
+          echo "mode=Full/Resume" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          echo "Starting full download or resuming previous run (2006-01 to present)."
+      }
+
+      # 최종 명령 실행
+      Write-Host "Executing command: $command"
+      Invoke-Expression $command
+    
+    # 다운로드 중 100회 제한에 걸리면 스크립트가 종료되므로, 에러를 무시합니다.
+    continue-on-error: true
+
+  # 5. 결과 로그 출력 및 아티팩트 업로드
+  - name: Show Results and Upload Artifacts
+    if: always()
+    shell: powershell
+    run: |
+      echo "========== Execution Log =========="
+      Get-Content download_log.txt -ErrorAction SilentlyContinue
+      echo ""
+      echo "========== Downloaded Files in Output Folder =========="
+      # 이 경로는 CI 환경 (output) 기준입니다. 로컬 저장소 (D:\OneDrive...)는 여기에 표시되지 않습니다.
+      Get-ChildItem -Path output -Recurse -Filter "*.xlsx" | Select-Object FullName | Format-List
+      echo ""
+      echo "========== Progress Status =========="
+      Get-Content download_progress.json -ErrorAction SilentlyContinue
+      
+    # 다운로드된 파일은 로컬 OneDrive 경로에 저장되지만,
+    # Artifact로 업로드하여 GitHub에서도 최종 로그와 진행 상황을 볼 수 있도록 합니다.
+  - name: Upload Logs and Progress
+    if: always()
+    uses: actions/upload-artifact@v4
+    with:
+      name: full-download-results
+      path: |
+        download_log.txt
+        download_progress.json
+      if-no-files-found: ignore
+      retention-days: 7
