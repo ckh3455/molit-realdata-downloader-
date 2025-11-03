@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-탭 선택 테스트 스크립트 (수정: Alert 처리 + URL 유지)
+탭 선택 테스트 스크립트 (수정: quarter-tab-cover 타겟팅)
 """
 import os
 import time
@@ -135,7 +135,7 @@ def reset_to_xls_page(driver):
 
 def find_and_click_tab(driver, tab_name: str, index: int) -> bool:
     """
-    탭 메뉴에서 특정 종목 클릭
+    탭 메뉴에서 특정 종목 클릭 (quarter-tab-cover 타겟팅)
     """
     log(f"탭 클릭 시도: {tab_name}", "INFO")
     
@@ -146,13 +146,18 @@ def find_and_click_tab(driver, tab_name: str, index: int) -> bool:
     save_screenshot(driver, f"{index:02d}_before_{tab_name}")
     save_page_source(driver, f"{index:02d}_before_{tab_name}")
     
-    # 여러 방법으로 탭 찾기
+    # ✅ 수정: quarter-tab-cover 내부의 탭만 찾기
     locators = [
+        # 1순위: quarter-tab-cover 클래스 내부
+        (By.XPATH, f"//ul[@class='quarter-tab-cover']//a[contains(text(), '{tab_name}')]"),
+        (By.XPATH, f"//ul[@class='quarter-tab-cover']//a[normalize-space()='{tab_name}']"),
+        
+        # 2순위: href가 javascript:void(0)인 것들 중
+        (By.XPATH, f"//a[@href='javascript:void(0)' and contains(text(), '{tab_name}')]"),
+        (By.XPATH, f"//a[@href='javascript:void(0)' and normalize-space()='{tab_name}']"),
+        
+        # 3순위: 일반 검색 (하지만 필터링 적용)
         (By.XPATH, f"//a[contains(text(), '{tab_name}')]"),
-        (By.XPATH, f"//a[normalize-space()='{tab_name}']"),
-        (By.XPATH, f"//button[contains(text(), '{tab_name}')]"),
-        (By.XPATH, f"//li//a[contains(text(), '{tab_name}')]"),
-        (By.LINK_TEXT, tab_name),
         (By.PARTIAL_LINK_TEXT, tab_name),
     ]
     
@@ -167,40 +172,50 @@ def find_and_click_tab(driver, tab_name: str, index: int) -> bool:
                     is_displayed = elem.is_displayed()
                     is_enabled = elem.is_enabled()
                     tag = elem.tag_name
-                    text = elem.text
+                    text = elem.text.strip()
+                    href = elem.get_attribute("href") or ""
                     classes = elem.get_attribute("class") or ""
                     
                     log(f"    요소 #{elem_idx}: tag={tag}, text='{text}', "
-                        f"displayed={is_displayed}, enabled={is_enabled}, "
-                        f"class='{classes}'", "DEBUG")
+                        f"href={href[:40] if href else ''}, displayed={is_displayed}, "
+                        f"enabled={is_enabled}, class='{classes}'", "DEBUG")
                     
-                    if is_displayed:
-                        # 스크롤
-                        driver.execute_script(
-                            "arguments[0].scrollIntoView({block:'center'});", 
-                            elem
-                        )
-                        time.sleep(0.3)
-                        
-                        # 클릭
-                        try:
-                            elem.click()
-                        except UnexpectedAlertPresentException:
-                            try_accept_alert(driver, 2.0)
-                            elem.click()
-                        
-                        log(f"  ✅ 클릭 성공! (방법 {method_idx}, 요소 #{elem_idx})", "SUCCESS")
-                        time.sleep(1.5)
-                        
-                        # Alert 처리
+                    # ✅ 필터: 화면에 보이지 않으면 스킵
+                    if not is_displayed:
+                        log(f"      → SKIP: 화면에 보이지 않음", "DEBUG")
+                        continue
+                    
+                    # ✅ 필터: GIS 페이지 링크 제외
+                    if "gis.do" in href:
+                        log(f"      → SKIP: GIS 페이지 링크", "DEBUG")
+                        continue
+                    
+                    # 스크롤
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", 
+                        elem
+                    )
+                    time.sleep(0.3)
+                    
+                    # 클릭
+                    try:
+                        elem.click()
+                    except UnexpectedAlertPresentException:
                         try_accept_alert(driver, 2.0)
-                        
-                        # 클릭 후 상태 저장
-                        save_screenshot(driver, f"{index:02d}_after_{tab_name}")
-                        save_page_source(driver, f"{index:02d}_after_{tab_name}")
-                        
-                        return True
-                        
+                        elem.click()
+                    
+                    log(f"  ✅ 클릭 성공! (방법 {method_idx}, 요소 #{elem_idx})", "SUCCESS")
+                    time.sleep(1.5)
+                    
+                    # Alert 처리
+                    try_accept_alert(driver, 2.0)
+                    
+                    # 클릭 후 상태 저장
+                    save_screenshot(driver, f"{index:02d}_after_{tab_name}")
+                    save_page_source(driver, f"{index:02d}_after_{tab_name}")
+                    
+                    return True
+                    
                 except Exception as e:
                     log(f"    요소 #{elem_idx} 처리 실패: {e}", "WARNING")
                     continue
@@ -222,17 +237,18 @@ def get_current_tab_info(driver) -> dict:
     }
     
     try:
+        # quarter-tab-cover 내 활성 탭
         active_selectors = [
+            "//ul[@class='quarter-tab-cover']//li[contains(@class, 'active')]//a",
+            "//ul[@class='quarter-tab-cover']//a[contains(@class, 'active')]",
             "//li[contains(@class, 'active')]//a",
             "//a[contains(@class, 'active')]",
-            "//li[contains(@class, 'on')]//a",
-            "//a[contains(@class, 'on')]",
         ]
         
         for sel in active_selectors:
             try:
                 elem = driver.find_element(By.XPATH, sel)
-                info["active_tab"] = elem.text
+                info["active_tab"] = elem.text.strip()
                 break
             except:
                 continue
@@ -280,6 +296,7 @@ def test_all_tabs():
             if success:
                 info = get_current_tab_info(driver)
                 log(f"  📌 현재 URL: {info['url']}", "INFO")
+                log(f"  📌 현재 활성 탭: {info['active_tab']}", "INFO")
             
             time.sleep(2)
         
