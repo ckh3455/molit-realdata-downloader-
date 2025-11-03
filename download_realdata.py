@@ -59,7 +59,7 @@ def build_driver():
     
     # 다운로드 설정
     prefs = {
-        "download.default_directory": str(TEMP_DOWNLOAD_DIR),
+        "download.default_directory": str(TEMP_DOWNLOAD_DIR.absolute()),
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
         "safebrowsing.enabled": True,
@@ -211,59 +211,69 @@ def click_excel_download(driver) -> bool:
         return False
 
 
-def wait_for_download(timeout: int = 30) -> Optional[Path]:
-    """다운로드 완료 대기"""
+def wait_for_download(timeout: int = 60) -> Optional[Path]:
+    """다운로드 완료 대기 - 개선된 버전"""
     start_time = time.time()
-    last_files = set()
+    baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
     
     log(f"  ⏳ 다운로드 대기 중... (폴더: {TEMP_DOWNLOAD_DIR})")
+    log(f"  📊 기존 파일 수: {len(baseline_files)}")
+    
+    found_crdownload = False
     
     while time.time() - start_time < timeout:
         elapsed = int(time.time() - start_time)
         
         # 현재 폴더의 모든 파일
-        current_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
+        current_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
         
         # .crdownload 파일 확인
-        crdownloads = list(TEMP_DOWNLOAD_DIR.glob("*.crdownload"))
+        crdownloads = [f for f in current_files if f.suffix == '.crdownload']
         if crdownloads:
-            if elapsed % 5 == 0:  # 5초마다 로그
-                log(f"  ⏳ 다운로드 진행 중... ({elapsed}초)")
-            time.sleep(1)
+            found_crdownload = True
+            if elapsed % 3 == 0:  # 3초마다 로그
+                sizes = [f.stat().st_size for f in crdownloads]
+                log(f"  ⏳ 다운로드 진행 중... ({elapsed}초, {sizes[0]:,} bytes)")
+            time.sleep(0.5)
             continue
         
-        # .xls, .xlsx 파일 확인 (확장자 대소문자 무시)
-        excel_files = [
-            p for p in current_files 
-            if p.is_file() and p.suffix.lower() in ['.xls', '.xlsx']
-        ]
-        
-        if excel_files:
-            # 가장 최근 파일
-            latest = max(excel_files, key=lambda p: p.stat().st_mtime)
+        # .crdownload가 사라진 직후 - 새 파일 찾기
+        if found_crdownload or elapsed > 3:
+            # 엑셀 파일 찾기 (다양한 패턴)
+            excel_files = [
+                f for f in current_files 
+                if f.is_file() and f.suffix.lower() in ['.xls', '.xlsx']
+                and f not in baseline_files  # 새로 생성된 파일만
+            ]
             
-            # 파일 크기 확인 (0바이트 아닌지)
-            size = latest.stat().st_size
-            if size > 0:
-                log(f"  ✅ 다운로드 완료: {latest.name} ({size:,} bytes)")
-                return latest
-            else:
-                log(f"  ⚠️  파일 크기 0: {latest.name}")
+            if excel_files:
+                # 가장 최근 파일
+                latest = max(excel_files, key=lambda p: p.stat().st_mtime)
+                size = latest.stat().st_size
+                
+                # 파일 크기 안정화 대기 (파일이 완전히 기록될 때까지)
+                if size > 0:
+                    time.sleep(1)  # 추가 대기
+                    new_size = latest.stat().st_size
+                    
+                    if new_size == size and size > 1000:  # 크기 변화 없고 최소 크기 이상
+                        log(f"  ✅ 다운로드 완료: {latest.name} ({size:,} bytes)")
+                        return latest
+                    elif new_size != size:
+                        log(f"  📝 파일 쓰기 중... ({new_size:,} bytes)")
         
-        # 새 파일 감지 로그
-        new_files = current_files - last_files
-        if new_files:
-            for f in new_files:
-                log(f"  📄 새 파일 감지: {f.name}")
-        last_files = current_files
-        
-        time.sleep(1)
+        time.sleep(0.5)
     
-    # 타임아웃 시 폴더 내용 출력
+    # 타임아웃 시 상세 진단
     log(f"  ❌ 다운로드 시간 초과 ({timeout}초)")
-    log(f"  📁 폴더 내용:")
-    for f in TEMP_DOWNLOAD_DIR.glob("*"):
-        log(f"     - {f.name} ({f.stat().st_size:,} bytes)")
+    log(f"  🔍 다운로드 상태:")
+    log(f"     - .crdownload 감지 여부: {found_crdownload}")
+    
+    all_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
+    log(f"  📁 현재 폴더 내용 ({len(all_files)}개):")
+    for f in all_files:
+        is_new = "🆕" if f not in baseline_files else "📄"
+        log(f"     {is_new} {f.name} ({f.stat().st_size:,} bytes)")
     
     return None
 
@@ -357,8 +367,8 @@ def download_single_month(driver, property_type: str, start_date: date, end_date
     if not click_excel_download(driver):
         return False
     
-    # 다운로드 대기
-    downloaded = wait_for_download(timeout=30)
+    # 다운로드 대기 (타임아웃 60초로 증가)
+    downloaded = wait_for_download(timeout=60)
     if not downloaded:
         return False
     
