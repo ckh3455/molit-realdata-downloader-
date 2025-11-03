@@ -34,10 +34,10 @@ TEMP_DOWNLOAD_DIR.mkdir(exist_ok=True)
 IS_CI = os.getenv("CI", "") == "1"
 
 
-def log(msg: str):
+def log(msg: str, end="\n"):
     """로그 출력"""
     timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] {msg}", flush=True)
+    print(f"[{timestamp}] {msg}", end=end, flush=True)
 
 
 def sanitize_folder_name(name: str) -> str:
