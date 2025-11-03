@@ -1,0 +1,71 @@
+name: Test Download
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_months:
+        description: '테스트할 개월 수'
+        required: true
+        default: '2'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test-download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    env:
+      CI: "1"
+      PYTHONUNBUFFERED: "1"
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Install Chromium & Chromedriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser chromium-chromedriver
+          echo "CHROME_BIN=/usr/bin/chromium-browser" >> $GITHUB_ENV
+          echo "CHROMEDRIVER_BIN=/usr/bin/chromedriver" >> $GITHUB_ENV
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+      
+      - name: Test download (limited months)
+        run: |
+          python download_realdata.py --test-mode --max-months ${{ github.event.inputs.test_months }} 2>&1 | tee download_test.log
+        continue-on-error: true
+      
+      - name: Show results
+        if: always()
+        run: |
+          echo "========== Download Log =========="
+          cat download_test.log || echo "No log"
+          echo ""
+          echo "========== Downloaded Files =========="
+          find output -type f -name "*.xlsx" -ls || echo "No files"
+          echo ""
+          echo "========== Progress =========="
+          cat download_progress.json || echo "No progress file"
+      
+      - name: Upload downloaded files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-downloads
+          path: |
+            output/**/*.xlsx
+            download_test.log
+            download_progress.json
+          if-no-files-found: ignore
+          retention-days: 3
