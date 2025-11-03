@@ -6,8 +6,11 @@ from pathlib import Path
 # GitHub Actions 여부
 IS_CI = os.getenv("CI", "") == "1"
 
-# ✅ 다운로드 경로 (로컬)
-DOWNLOAD_DIR = Path(r"C:\Users\USER\OneDrive\office work\부동산 실거래 데이터")
+# 다운로드 경로
+if IS_CI:
+    DOWNLOAD_DIR = Path("./output")  # GitHub Actions용
+else:
+    DOWNLOAD_DIR = Path(r"C:\Users\USER\OneDrive\office work\부동산 실거래 데이터")  # 로컬용
 
 # 임시 다운로드 폴더
 TEMP_DOWNLOAD_DIR = Path("./_temp_downloads")
@@ -26,3 +29,13 @@ PROPERTY_TYPES = [
     "상업/업무용",
     "공장/창고 등"
 ]
+```
+
+---
+
+## 🚀 사용 방법
+
+### 1. **GitHub Actions에서 테스트**
+```
+Actions → Test Download → Run workflow
+→ test_months: 2 (최근 2개월만 테스트)
