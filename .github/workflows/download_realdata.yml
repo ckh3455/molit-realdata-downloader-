@@ -37,12 +37,13 @@ jobs:
           gnupg \
           software-properties-common \
           apt-transport-https \
-          ca-certificates
+          ca-certificates \
+          curl
     
     - name: Install Chrome
       run: |
-        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-        sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
+        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list > /dev/null
         sudo apt-get update
         sudo apt-get install -y google-chrome-stable
     
@@ -68,7 +69,7 @@ jobs:
         ONEDRIVE_REMOTE: "onedrive:office work/부동산 실거래 데이터"
       run: |
         mode="${{ github.event.inputs.mode }}"
-        if [ "$mode" = "update" ]; then
+        if [ "$mode" = "update" ] || [ -z "$mode" ]; then
           python download_realdata.py --update-mode
         else
           python download_realdata.py
@@ -78,7 +79,7 @@ jobs:
     - name: Upload progress file to OneDrive
       if: always()
       run: |
-        rclone copy download_progress.json "onedrive:office work/부동산 실거래 데이터/" --no-check-dest
+        rclone copy download_progress.json "onedrive:office work/부동산 실거래 데이터/" --no-check-dest || echo "Failed to upload progress file"
     
     - name: Upload logs as artifact
       if: always()
