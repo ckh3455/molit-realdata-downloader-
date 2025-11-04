@@ -97,6 +97,13 @@ jobs:
         "
         chmod 600 service-account.json
     
+    - name: Check Google Drive folder contents
+      env:
+        SERVICE_ACCOUNT_JSON: service-account.json
+        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+      run: |
+        python check_gdrive_folder.py
+    
     - name: Check existing files in Google Drive
       env:
         SERVICE_ACCOUNT_JSON: service-account.json
