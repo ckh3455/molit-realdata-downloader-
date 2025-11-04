@@ -69,8 +69,10 @@ jobs:
     
     - name: Create service account JSON file
       run: |
-        echo "${{ secrets.SERVICE_ACCOUNT_JSON }}" > service-account.json
+        echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
         chmod 600 service-account.json
+        # JSON 파일 검증
+        python -c "import json; json.load(open('service-account.json')); print('✅ JSON 파일 검증 성공')"
     
     - name: Check existing files in Google Drive
       env:
