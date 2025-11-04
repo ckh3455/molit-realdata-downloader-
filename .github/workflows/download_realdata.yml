@@ -45,12 +45,15 @@ jobs:
       run: |
         mkdir -p ~/.config/rclone
         echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
-        # 권한 설정
         chmod 600 ~/.config/rclone/rclone.conf
     
     - name: Verify rclone configuration
       run: |
         rclone config show onedrive
+    
+    - name: Test OneDrive connection
+      run: |
+        rclone lsd onedrive: || echo "OneDrive 연결 실패 (토큰 만료 가능성)"
     
     - name: Install Python dependencies
       run: |
@@ -64,21 +67,9 @@ jobs:
       run: |
         python download_realdata.py --update-mode
     
-    - name: Upload progress file to OneDrive
+    - name: Upload progress file to OneDrive (final sync)
       if: always()
       run: |
         if [ -f download_progress.json ]; then
-          rclone copy download_progress.json "onedrive:office work/부동산 실거래 데이터/" --no-check-dest || echo "Failed to upload progress file"
-        else
-          echo "download_progress.json not found"
+          rclone copy download_progress.json "onedrive:office work/부동산 실거래 데이터/" --no-check-dest || echo "Progress file upload failed"
         fi
-    
-    - name: Upload logs as artifact
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: download-logs
-        path: |
-          *.log
-          download_progress.json
-        retention-days: 7
