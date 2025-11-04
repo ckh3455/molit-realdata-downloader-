@@ -68,11 +68,34 @@ jobs:
         pip install -r requirements.txt
     
     - name: Create service account JSON file
+      env:
+        SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
       run: |
-        echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+        python -c "
+        import json
+        import os
+        import sys
+        
+        # Secret에서 JSON 가져오기
+        json_str = os.environ.get('SERVICE_ACCOUNT_JSON', '')
+        if not json_str:
+            print('❌ SERVICE_ACCOUNT_JSON이 비어있습니다', file=sys.stderr)
+            sys.exit(1)
+        
+        # JSON 파싱하여 검증
+        try:
+            json_data = json.loads(json_str)
+            # 파일로 저장
+            with open('service-account.json', 'w', encoding='utf-8') as f:
+                json.dump(json_data, f, indent=2, ensure_ascii=False)
+            print('✅ service-account.json 파일 생성 완료')
+            print(f'   Keys: {list(json_data.keys())[:5]}...')
+        except json.JSONDecodeError as e:
+            print(f'❌ JSON 파싱 오류: {e}', file=sys.stderr)
+            print(f'   첫 100자: {json_str[:100]}', file=sys.stderr)
+            sys.exit(1)
+        "
         chmod 600 service-account.json
-        # JSON 파일 검증
-        python -c "import json; json.load(open('service-account.json')); print('✅ JSON 파일 검증 성공')"
     
     - name: Check existing files in Google Drive
       env:
