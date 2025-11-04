@@ -7,25 +7,46 @@ __pycache__/
 env/
 venv/
 ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
 # 다운로드 파일
 output/
-_rt_downloads/
+_temp_downloads/
 *.xlsx
 *.xls
-*.csv
 
-# 크롬 프로필
-chrome_prof_*
+# 진행 상황
+download_progress.json
+existing_files.json
+
+# Google 서비스 계정
+service-account.json
+*.json
 
 # 로그
 *.log
 
-# 설정
-.env
-sa.json
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
-```
