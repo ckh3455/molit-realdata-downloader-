@@ -14,7 +14,7 @@ Google Drive 관리 스크립트
 
 환경변수:
     SERVICE_ACCOUNT_JSON: 서비스 계정 JSON 파일 경로
-    GDRIVE_FOLDER_ID: Google Drive 폴더 ID
+    GDRIVE_FOLDER_ID: Google Drive 폴더 ID (URL 또는 ID만)
 """
 import os
 import sys
@@ -30,6 +30,20 @@ from googleapiclient.http import MediaFileUpload
 def log(msg: str):
     """로그 출력"""
     print(msg, flush=True)
+
+
+def extract_folder_id(folder_id_raw: str) -> str:
+    """URL에서 폴더 ID 추출"""
+    if not folder_id_raw:
+        return None
+    
+    # URL 형식: https://drive.google.com/drive/folders/1x3lHLwrixnqVFpUoxkEzqgmcn19Jhw19
+    if 'folders/' in folder_id_raw:
+        folder_id = folder_id_raw.split('folders/')[-1].split('?')[0].split('/')[0].strip()
+    else:
+        folder_id = folder_id_raw.strip()
+    
+    return folder_id
 
 
 def get_drive_service(service_account_path: str):
@@ -65,7 +79,7 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
         {폴더명: {파일명1, 파일명2, ...}}
     """
     log("🔍 Google Drive 기존 파일 확인 중...")
-    log(f"   📂 폴더 ID: {folder_id}")
+    log(f"   📂 루트 폴더 ID: {folder_id}")
     
     existing = {}
     
@@ -74,14 +88,20 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
     folders = []
     page_token = None
     
+    log(f"   🔎 쿼리: {query}")
+    
     while True:
-        results = service.files().list(
-            q=query,
-            spaces='drive',
-            fields='nextPageToken, files(id, name)',
-            pageSize=100,
-            pageToken=page_token
-        ).execute()
+        try:
+            results = service.files().list(
+                q=query,
+                spaces='drive',
+                fields='nextPageToken, files(id, name)',
+                pageSize=100,
+                pageToken=page_token
+            ).execute()
+        except Exception as e:
+            log(f"   ❌ 폴더 목록 조회 실패: {e}")
+            raise
         
         folders.extend(results.get('files', []))
         page_token = results.get('nextPageToken')
@@ -93,11 +113,15 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
         log(f"      - {f['name']} (ID: {f['id']})")
     log("")
     
+    if len(folders) == 0:
+        log("   ⚠️  폴더가 없습니다. 폴더 ID가 올바른지 확인하세요.")
+        return {}
+    
     for folder in folders:
         folder_name = folder['name']
         folder_id_sub = folder['id']
         
-        log(f"   📁 '{folder_name}' 폴더 스캔 중...")
+        log(f"   📁 '{folder_name}' 폴더 스캔 중... (ID: {folder_id_sub})")
         
         # 각 폴더의 파일 목록 (페이지네이션 처리)
         query = f"'{folder_id_sub}' in parents and trashed=false"
@@ -107,14 +131,18 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
         
         while True:
             page_num += 1
-            results = service.files().list(
-                q=query,
-                spaces='drive',
-                fields='nextPageToken, files(id, name, size, modifiedTime)',
-                pageSize=1000,
-                pageToken=page_token,
-                orderBy='name'
-            ).execute()
+            try:
+                results = service.files().list(
+                    q=query,
+                    spaces='drive',
+                    fields='nextPageToken, files(id, name, size, modifiedTime)',
+                    pageSize=1000,
+                    pageToken=page_token,
+                    orderBy='name'
+                ).execute()
+            except Exception as e:
+                log(f"      ❌ 페이지 {page_num} 조회 실패: {e}")
+                break
             
             page_files = results.get('files', [])
             files.extend(page_files)
@@ -139,8 +167,20 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
             if parsed_files:
                 # 년도, 월로 정렬
                 parsed_files.sort(key=lambda x: (x[0][1], x[0][2]))
-                log(f"      최신 파일: {parsed_files[-1][1]}")
-                log(f"      최초 파일: {parsed_files[0][1]}")
+                log(f"      최초 파일: {parsed_files[0][1]} ({parsed_files[0][0][1]}-{parsed_files[0][0][2]:02d})")
+                log(f"      최신 파일: {parsed_files[-1][1]} ({parsed_files[-1][0][1]}-{parsed_files[-1][0][2]:02d})")
+                
+                # 샘플 파일명 몇 개 출력 (2006년, 2024년 등)
+                sample_files = []
+                for year in [2006, 2010, 2015, 2020, 2024]:
+                    for parsed, fname in parsed_files:
+                        if parsed[0][1] == year:
+                            sample_files.append(fname)
+                            break
+                if sample_files:
+                    log(f"      샘플: {', '.join(sample_files[:5])}")
+            else:
+                log(f"      ⚠️  날짜 파싱 가능한 파일 없음")
         else:
             log(f"   ⚠️  {folder_name}: (파일 없음)")
         log("")
@@ -333,11 +373,16 @@ def main():
     
     # 환경변수에서 설정 읽기
     service_account_path = os.getenv('SERVICE_ACCOUNT_JSON', 'service-account.json')
-    folder_id = os.getenv('GDRIVE_FOLDER_ID')
+    folder_id_raw = os.getenv('GDRIVE_FOLDER_ID')
     local_dir = Path(os.getenv('OUTPUT_DIR', 'output'))
+    
+    # 폴더 ID 추출 (URL 또는 ID만)
+    folder_id = extract_folder_id(folder_id_raw)
     
     if not folder_id:
         log("❌ GDRIVE_FOLDER_ID 환경변수가 설정되지 않았습니다.")
+        log("   예: 1x3lHLwrixnqVFpUoxkEzqgmcn19Jhw19")
+        log("   또는: https://drive.google.com/drive/folders/1x3lHLwrixnqVFpUoxkEzqgmcn19Jhw19")
         sys.exit(1)
     
     if not Path(service_account_path).exists():
@@ -347,7 +392,9 @@ def main():
     log("=" * 60)
     log("📤 Google Drive 관리")
     log("=" * 60)
-    log(f"☁️  Drive: {folder_id}")
+    if folder_id_raw != folder_id:
+        log(f"   원본: {folder_id_raw}")
+    log(f"☁️  폴더 ID: {folder_id}")
     log("")
     
     try:
