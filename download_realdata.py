@@ -6,7 +6,7 @@
 - 진행 상황 저장 및 재개
 - 100회 제한 대응 (다음날 자동 재개)
 - 업데이트 모드 (최근 1년만 갱신)
-- Microsoft Graph API를 사용한 OneDrive 통합
+- CI 환경에서만 rclone으로 OneDrive 업로드
 파일명: download_realdata.py
 """
 
@@ -16,7 +16,7 @@ import sys
 import json
 import time
 import argparse
-import stat
+import subprocess
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple, List
@@ -28,35 +28,36 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.alert import Alert
 from selenium.common.exceptions import UnexpectedAlertPresentException
 
-# config.py에서 설정 가져오기
-import config
+# ==================== 설정 ====================
+IS_CI = os.getenv("CI", "") == "1"
 
-# CI 환경에서 OneDrive 클라이언트 초기화
-onedrive_client = None
-if config.IS_CI:
-    client_id = os.getenv("AZURE_CLIENT_ID")
-    client_secret = os.getenv("AZURE_CLIENT_SECRET")
-    tenant_id = os.getenv("AZURE_TENANT_ID")
-    
-    if client_id and client_secret and tenant_id:
-        try:
-            from onedrive_client import OneDriveClient
-            onedrive_client = OneDriveClient(client_id, client_secret, tenant_id)
-            print(f"✅ OneDrive 클라이언트 초기화 완료")
-        except Exception as e:
-            print(f"⚠️  OneDrive 클라이언트 초기화 실패: {e}")
-            onedrive_client = None
+# 저장 폴더 (환경에 따라 자동 전환)
+if IS_CI:
+    # GitHub Actions: 로컬에 저장 후 rclone으로 업로드
+    DOWNLOAD_DIR = Path("output")
+    ONEDRIVE_REMOTE = os.getenv("ONEDRIVE_REMOTE", "onedrive:office work/부동산 실거래 데이터")
+else:
+    # 로컬 PC: OneDrive 경로에 직접 저장
+    DOWNLOAD_DIR = Path(r"D:\OneDrive\office work\부동산 실거래 데이터")
+    ONEDRIVE_REMOTE = None
 
-# ==================== 설정 (config.py에서 가져옴) ====================
+# 임시 다운로드 폴더
+TEMP_DOWNLOAD_DIR = Path("_temp_downloads")
 
-IS_CI = config.IS_CI
-DOWNLOAD_DIR = config.DOWNLOAD_DIR
-TEMP_DOWNLOAD_DIR = config.TEMP_DOWNLOAD_DIR
-MOLIT_URL = config.MOLIT_URL
-PROPERTY_TYPES = config.PROPERTY_TYPES
+# 국토부 URL (엑셀 다운로드 페이지)
+MOLIT_URL = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
 
-# CI 환경에서 OneDrive 기본 폴더
-ONEDRIVE_BASE_FOLDER = os.getenv("ONEDRIVE_BASE_FOLDER", "office work/부동산 실거래 데이터")
+# 부동산 종목 (8개)
+PROPERTY_TYPES = [
+    "아파트",
+    "연립다세대",
+    "단독다가구",
+    "오피스텔",
+    "토지",
+    "상업업무용",
+    "분양권",
+    "입주권"
+]
 
 # 진행 상황 파일
 PROGRESS_FILE = Path("download_progress.json")
@@ -75,57 +76,80 @@ def sanitize_folder_name(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '_', name)
 
 def upload_to_onedrive(local_path: Path, remote_path: str) -> bool:
-    """Microsoft Graph API를 사용하여 OneDrive에 업로드"""
-    if not IS_CI or not onedrive_client:
+    """CI 환경에서만 rclone으로 OneDrive에 업로드"""
+    if not IS_CI or not ONEDRIVE_REMOTE:
         return True  # 로컬에서는 불필요 (이미 로컬 OneDrive 폴더에 저장됨)
     
     try:
         log(f"  ☁️  OneDrive 업로드 시작: {remote_path}")
         
-        # 전체 경로 구성
-        full_remote_path = f"{ONEDRIVE_BASE_FOLDER}/{remote_path}"
+        cmd = [
+            "rclone", "copy",
+            str(local_path),
+            f"{ONEDRIVE_REMOTE}/{remote_path}",
+            "--progress",
+            "--transfers", "1",
+            "--checkers", "1"
+        ]
         
-        success = onedrive_client.upload_file(local_path, full_remote_path)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
         
-        if success:
+        if result.returncode == 0:
             log(f"  ✅ OneDrive 업로드 완료")
+            return True
         else:
-            log(f"  ❌ OneDrive 업로드 실패")
-        
-        return success
+            log(f"  ❌ OneDrive 업로드 실패 (코드: {result.returncode})")
+            if result.stderr:
+                log(f"  오류: {result.stderr[:300]}")
+            return False
             
+    except subprocess.TimeoutExpired:
+        log(f"  ⏱️  업로드 타임아웃")
+        return False
     except Exception as e:
         log(f"  ❌ 업로드 오류: {e}")
         return False
 
 def sync_progress_to_onedrive() -> bool:
-    """진행 상황 파일을 OneDrive에 동기화"""
-    if not IS_CI or not onedrive_client:
-        return True  # 로컬에서는 불필요
+    """CI 환경에서 진행 상황 파일을 OneDrive에 동기화"""
+    if not IS_CI or not ONEDRIVE_REMOTE:
+        return True
     
     try:
         log("  ☁️  진행 상황 파일 동기화 중...")
-        
-        remote_path = f"{ONEDRIVE_BASE_FOLDER}/{PROGRESS_FILE.name}"
-        success = onedrive_client.upload_file(PROGRESS_FILE, remote_path)
-        
-        return success
+        cmd = [
+            "rclone", "copy",
+            str(PROGRESS_FILE),
+            f"{ONEDRIVE_REMOTE}/",
+            "--no-check-dest"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return result.returncode == 0
     except Exception as e:
         log(f"  ⚠️  진행 상황 동기화 실패: {e}")
         return False
 
 def download_progress_from_onedrive() -> dict:
-    """OneDrive에서 진행 상황 파일 다운로드"""
-    if not IS_CI or not onedrive_client:
+    """CI 환경에서 OneDrive에서 진행 상황 파일 다운로드"""
+    if not IS_CI or not ONEDRIVE_REMOTE:
         return {}
     
     try:
         log("  ☁️  진행 상황 파일 다운로드 중...")
+        cmd = [
+            "rclone", "copy",
+            f"{ONEDRIVE_REMOTE}/{PROGRESS_FILE.name}",
+            ".",
+            "--no-check-dest"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         
-        remote_path = f"{ONEDRIVE_BASE_FOLDER}/{PROGRESS_FILE.name}"
-        success = onedrive_client.download_file(remote_path, PROGRESS_FILE)
-        
-        if success and PROGRESS_FILE.exists():
+        if result.returncode == 0 and PROGRESS_FILE.exists():
             log("  ✅ 진행 상황 파일 다운로드 완료")
         else:
             log("  ℹ️  진행 상황 파일이 없습니다 (처음 실행)")
@@ -135,65 +159,58 @@ def download_progress_from_onedrive() -> dict:
     return load_progress()
 
 def list_files_in_onedrive_folder(property_type: str) -> set:
-    """OneDrive 폴더의 파일 목록 가져오기"""
-    if not IS_CI or not onedrive_client:
+    """CI 환경에서 OneDrive 폴더의 파일 목록 가져오기"""
+    if not IS_CI or not ONEDRIVE_REMOTE:
         # 로컬 환경에서는 로컬 파일 시스템에서 확인
         folder_name = sanitize_folder_name(property_type)
         folder_path = DOWNLOAD_DIR / folder_name
         if folder_path.exists():
             files = {f.name for f in folder_path.iterdir() if f.is_file()}
-            log(f"  📁 로컬에서 {len(files)}개 파일 발견: {property_type}")
             return files
         return set()
     
     try:
         folder_name = sanitize_folder_name(property_type)
-        remote_path = f"{ONEDRIVE_BASE_FOLDER}/{folder_name}"
+        remote_path = f"{ONEDRIVE_REMOTE}/{folder_name}/"
         
-        log(f"  📁 OneDrive 폴더 목록 조회: {property_type}")
-        files = onedrive_client.list_files(remote_path)
+        cmd = ["rclone", "lsf", remote_path]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         
-        log(f"  📁 OneDrive에서 {len(files)}개 파일 발견: {property_type}")
-        if len(files) > 0 and len(files) <= 10:
-            log(f"  📋 파일 목록: {list(files)[:10]}")
-        
-        return files
+        if result.returncode == 0:
+            files = {line.strip() for line in result.stdout.strip().split('\n') if line.strip()}
+            log(f"  📁 OneDrive에서 {len(files)}개 파일 발견: {property_type}")
+            return files
+        else:
+            return set()
     except Exception as e:
         log(f"  ⚠️  OneDrive 파일 목록 확인 실패: {e}")
         return set()
 
 def check_file_exists_in_onedrive(property_type: str, year: int, month: int, onedrive_files: set = None) -> bool:
-    """OneDrive에서 파일 존재 여부 확인"""
-    if not IS_CI or not onedrive_client:
-        # 로컬 환경에서는 로컬 파일 시스템에서 확인
-        folder_name = sanitize_folder_name(property_type)
-        filename = f"{property_type} {year:04d}{month:02d}.xlsx"
-        local_path = DOWNLOAD_DIR / folder_name / filename
-        return local_path.exists()
+    """CI 환경에서 OneDrive에서 파일 존재 여부 확인"""
+    if not IS_CI or not ONEDRIVE_REMOTE:
+        return False
     
-    # 파일명 생성
     filename = f"{property_type} {year:04d}{month:02d}.xlsx"
     
-    # 파일 목록이 제공된 경우 사용
     if onedrive_files is not None:
         return filename in onedrive_files
     
-    # 직접 확인
     try:
         folder_name = sanitize_folder_name(property_type)
-        remote_path = f"{ONEDRIVE_BASE_FOLDER}/{folder_name}/{filename}"
-        return onedrive_client.file_exists(remote_path)
-    except Exception as e:
-        log(f"  ⚠️  OneDrive 파일 확인 실패: {e}")
+        remote_path = f"{ONEDRIVE_REMOTE}/{folder_name}/{filename}"
+        cmd = ["rclone", "lsf", remote_path]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return result.returncode == 0 and result.stdout.strip() != ""
+    except:
         return False
 
-# ... (나머지 함수들은 동일하므로 생략) ...
-
 def build_driver():
-    """크롬 드라이버 생성 - 간소화된 버전"""
+    """크롬 드라이버 생성"""
     opts = Options()
     if IS_CI:
         opts.add_argument("--headless=new")
+    
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
@@ -217,118 +234,17 @@ def build_driver():
     
     # CI 환경
     chromedriver_bin = os.getenv("CHROMEDRIVER_BIN")
-    
     if chromedriver_bin and Path(chromedriver_bin).exists():
-        driver_path = chromedriver_bin
+        service = Service(chromedriver_bin)
     else:
         from webdriver_manager.chrome import ChromeDriverManager
-        
-        try:
-            driver_path = ChromeDriverManager().install()
-        except Exception as e:
-            log(f"  ❌ ChromeDriverManager().install() 실패: {e}")
-            raise
-        
-        driver_path_obj = Path(driver_path)
-        
-        # 디렉토리인 경우 실행 파일 찾기
-        if driver_path_obj.is_dir():
-            candidates = [
-                driver_path_obj / "chromedriver",
-                driver_path_obj / "chromedriver.exe",
-            ]
-            
-            found = False
-            for candidate in candidates:
-                if candidate.exists() and candidate.is_file():
-                    try:
-                        is_executable = os.access(candidate, os.X_OK)
-                        if is_executable or candidate.suffix == '.exe':
-                            driver_path = str(candidate.absolute())
-                            found = True
-                            break
-                    except:
-                        pass
-            
-            if not found:
-                all_files = list(driver_path_obj.iterdir())
-                executable_files = []
-                
-                for f in all_files:
-                    if not f.is_file():
-                        continue
-                    
-                    if 'NOTICES' in f.name.upper():
-                        continue
-                    
-                    if f.suffix in ['.txt', '.sh', '.md', '.pdf', '.json']:
-                        continue
-                    
-                    if f.name == "chromedriver" or f.name == "chromedriver.exe":
-                        executable_files.insert(0, f)
-                        continue
-                    
-                    if f.name.lower().startswith("chromedriver"):
-                        executable_files.append(f)
-                        continue
-                
-                if executable_files:
-                    selected = executable_files[0]
-                    driver_path = str(selected.absolute())
-                    found = True
-                else:
-                    parent_chromedriver = driver_path_obj.parent / "chromedriver"
-                    if parent_chromedriver.exists() and parent_chromedriver.is_file():
-                        driver_path = str(parent_chromedriver.absolute())
-                        found = True
-                    else:
-                        raise RuntimeError(f"ChromeDriver executable not found in {driver_path}")
-        else:
-            if not driver_path_obj.exists():
-                raise RuntimeError(f"ChromeDriver not found at {driver_path}")
-            
-            file_name = driver_path_obj.name
-            
-            if 'NOTICES' in file_name.upper():
-                parent_dir = driver_path_obj.parent
-                if parent_dir.exists() and parent_dir.is_dir():
-                    try:
-                        parent_files = list(parent_dir.iterdir())
-                        for item in parent_files:
-                            if item.is_file() and 'NOTICES' not in item.name.upper():
-                                if item.name == "chromedriver" or item.name.lower().startswith("chromedriver"):
-                                    driver_path = str(item.absolute())
-                                    driver_path_obj = Path(driver_path)
-                                    break
-                    except Exception as e:
-                        pass
-                
-                if 'NOTICES' in driver_path_obj.name.upper():
-                    raise RuntimeError(f"ChromeDriver path points to NOTICES file: {driver_path}")
-            
-            driver_path = str(driver_path_obj.absolute())
-        
-        # 실행 권한 부여 (Linux/Unix - CI 환경)
-        if sys.platform != 'win32':
-            try:
-                current_perms = os.stat(driver_path).st_mode
-                os.chmod(driver_path, current_perms | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-            except Exception as e:
-                pass
-        
-        service = Service(driver_path)
+        service = Service(ChromeDriverManager().install())
     
     chrome_bin = os.getenv("CHROME_BIN")
     if chrome_bin:
         opts.binary_location = chrome_bin
     
-    try:
-        driver = webdriver.Chrome(service=service, options=opts)
-        log(f"  ✅ Chrome 드라이버 생성 성공")
-    except Exception as e:
-        log(f"  ❌ Chrome 드라이버 생성 실패: {e}")
-        raise
-    
+    driver = webdriver.Chrome(service=service, options=opts)
     return driver
 
 def try_accept_alert(driver, timeout=3.0) -> bool:
@@ -389,6 +305,7 @@ def select_property_tab(driver, tab_name: str) -> bool:
             
             log(f"  ✅ 탭 선택 완료: {tab_name}")
             return True
+            
         except Exception as e:
             if idx == len(selectors):
                 log(f"  ❌ 탭 선택 실패: {e}")
@@ -451,6 +368,7 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
         else:
             log(f"  ⚠️  날짜 검증 실패: 기대={start_val}~{end_val}, 실제={actual_start}~{actual_end}")
             return False
+            
     except Exception as e:
         log(f"  ❌ 날짜 설정 실패: {e}")
         return False
@@ -562,7 +480,7 @@ def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, m
     downloaded_file.rename(dest_path)
     log(f"  📁 저장: {dest_path}")
     
-    # CI 환경에서 OneDrive 업로드
+    # CI 환경에서만 OneDrive 업로드
     if IS_CI:
         remote_path = f"{folder_name}/{filename}"
         upload_to_onedrive(dest_path, remote_path)
@@ -612,7 +530,7 @@ def is_already_downloaded(property_type: str, year: int, month: int, onedrive_fi
     folder_name = sanitize_folder_name(property_type)
     filename = f"{property_type} {year:04d}{month:02d}.xlsx"
     
-    # 로컬 파일 확인 (항상 먼저 확인)
+    # 로컬 파일 확인
     local_path = DOWNLOAD_DIR / folder_name / filename
     if local_path.exists():
         return True
@@ -673,23 +591,7 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
         
         baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
         
-        try:
-            if not click_excel_download(driver):
-                if attempt < max_retries:
-                    log(f"  ⏳ 15초 대기 후 재시도...")
-                    time.sleep(15)
-                    continue
-                return False
-        except Exception as e:
-            if "alert" in str(e).lower():
-                log(f"  ⚠️  Alert 발생 가능성 감지: {e}")
-                try:
-                    try_accept_alert(driver, 3.0)
-                    continue
-                except Exception as alert_e:
-                    if str(alert_e) == "DOWNLOAD_LIMIT_100":
-                        raise
-                    log(f"  ❌ Alert 처리 실패: {alert_e}")
+        if not click_excel_download(driver):
             if attempt < max_retries:
                 log(f"  ⏳ 15초 대기 후 재시도...")
                 time.sleep(15)
@@ -794,12 +696,11 @@ def main():
             log(f"📊 [{prop_idx}/{len(PROPERTY_TYPES)}] {property_type}")
             log("="*70)
             
-            # 파일 목록 가져오기 (로컬 또는 OneDrive)
+            # 파일 목록 가져오기 (CI 환경에서 OneDrive 확인)
             onedrive_files = None
             if IS_CI:
                 onedrive_files = list_files_in_onedrive_folder(property_type)
             elif not IS_CI:
-                # 로컬 환경에서는 로컬 파일 시스템에서 확인
                 onedrive_files = list_files_in_onedrive_folder(property_type)
             
             # 탭 선택
