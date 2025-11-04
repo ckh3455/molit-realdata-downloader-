@@ -97,19 +97,23 @@ jobs:
         "
         chmod 600 service-account.json
     
-    - name: Check Google Drive folder contents
-      env:
-        SERVICE_ACCOUNT_JSON: service-account.json
-        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-      run: |
-        python check_gdrive_folder.py
-    
     - name: Check existing files in Google Drive
       env:
         SERVICE_ACCOUNT_JSON: service-account.json
         GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
       run: |
-        python upload_to_gdrive.py --check-existing || echo "⚠️ 기존 파일 확인 실패 (처음 실행일 수 있음)"
+        echo "=========================================="
+        echo "🔍 Google Drive 기존 파일 확인 시작"
+        echo "=========================================="
+        python upload_to_gdrive.py --check-existing
+        echo ""
+        echo "=========================================="
+        echo "✅ 기존 파일 확인 완료"
+        echo "=========================================="
+        echo ""
+        echo "=== existing_files.json 내용 ==="
+        cat existing_files.json 2>/dev/null || echo "파일 없음"
+        echo ""
     
     - name: Run download script
       env:
