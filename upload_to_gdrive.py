@@ -33,7 +33,11 @@ def log(msg: str):
 
 def get_drive_service(service_account_path: str):
     """Google Drive 서비스 생성"""
-    SCOPES = ['https://www.googleapis.com/auth/drive.file']
+    # 읽기 권한도 필요하므로 drive.readonly 추가
+    SCOPES = [
+        'https://www.googleapis.com/auth/drive.file',
+        'https://www.googleapis.com/auth/drive.readonly'
+    ]
     creds = service_account.Credentials.from_service_account_file(
         service_account_path, scopes=SCOPES)
     return build('drive', 'v3', credentials=creds)
@@ -41,7 +45,7 @@ def get_drive_service(service_account_path: str):
 
 def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
     """
-    Google Drive의 기존 파일 목록 조회
+    Google Drive의 기존 파일 목록 조회 (페이지네이션 지원)
     
     Returns:
         {폴더명: {파일명1, 파일명2, ...}}
@@ -50,14 +54,24 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
     
     existing = {}
     
-    # 폴더 목록 조회
+    # 폴더 목록 조회 (페이지네이션 처리)
     query = f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
-    results = service.files().list(
-        q=query,
-        spaces='drive',
-        fields='files(id, name)'
-    ).execute()
-    folders = results.get('files', [])
+    folders = []
+    page_token = None
+    
+    while True:
+        results = service.files().list(
+            q=query,
+            spaces='drive',
+            fields='nextPageToken, files(id, name)',
+            pageSize=100,
+            pageToken=page_token
+        ).execute()
+        
+        folders.extend(results.get('files', []))
+        page_token = results.get('nextPageToken')
+        if not page_token:
+            break
     
     log(f"   📂 {len(folders)}개 폴더 발견")
     
@@ -65,21 +79,32 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
         folder_name = folder['name']
         folder_id_sub = folder['id']
         
-        # 각 폴더의 파일 목록
+        # 각 폴더의 파일 목록 (페이지네이션 처리)
         query = f"'{folder_id_sub}' in parents and trashed=false"
-        results = service.files().list(
-            q=query,
-            spaces='drive',
-            fields='files(name)',
-            pageSize=1000
-        ).execute()
-        files = results.get('files', [])
+        files = []
+        page_token = None
+        
+        while True:
+            results = service.files().list(
+                q=query,
+                spaces='drive',
+                fields='nextPageToken, files(name)',
+                pageSize=1000,
+                pageToken=page_token
+            ).execute()
+            
+            files.extend(results.get('files', []))
+            page_token = results.get('nextPageToken')
+            if not page_token:
+                break
         
         file_names = {f['name'] for f in files}
         existing[folder_name] = file_names
         
         if file_names:
             log(f"      {folder_name}: {len(file_names)}개 파일")
+        else:
+            log(f"      {folder_name}: (파일 없음)")
     
     log("✅ 기존 파일 확인 완료\n")
     return existing
@@ -100,6 +125,17 @@ def check_existing_files(service_account_path: str, folder_id: str):
     # 통계
     total_files = sum(len(files) for files in existing.values())
     log(f"📊 전체 {total_files}개 파일")
+    
+    # 각 폴더별 상세 정보
+    for folder_name, files in existing.items():
+        if files:
+            log(f"   {folder_name}: {len(files)}개")
+            # 처음 5개 파일명 출력
+            sample_files = sorted(list(files))[:5]
+            for fname in sample_files:
+                log(f"      - {fname}")
+            if len(files) > 5:
+                log(f"      ... 외 {len(files) - 5}개")
     
     return existing
 
