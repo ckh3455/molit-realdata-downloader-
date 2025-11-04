@@ -282,7 +282,55 @@ def download_progress_from_onedrive() -> dict:
 
     return load_progress()
 
-def check_file_exists_in_onedrive(property_type: str, year: int, month: int) -> bool:
+def list_files_in_onedrive_folder(property_type: str) -> set:
+
+    """OneDrive 폴더의 파일 목록 가져오기"""
+
+    if not IS_CI or not ONEDRIVE_REMOTE:
+
+        return set()
+
+    
+
+    try:
+
+        folder_name = sanitize_folder_name(property_type)
+
+        remote_path = f"{ONEDRIVE_REMOTE}/{folder_name}/"
+
+        
+
+        # rclone으로 파일 목록 가져오기
+
+        cmd = ["rclone", "lsf", remote_path]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+        
+
+        if result.returncode == 0:
+
+            # 파일명만 추출 (확장자 포함)
+
+            files = {line.strip() for line in result.stdout.strip().split('\n') if line.strip()}
+
+            log(f"  📁 OneDrive에서 {len(files)}개 파일 발견: {property_type}")
+
+            return files
+
+        else:
+
+            log(f"  ⚠️  OneDrive 폴더 목록 가져오기 실패: {result.stderr}")
+
+            return set()
+
+    except Exception as e:
+
+        log(f"  ⚠️  OneDrive 파일 목록 확인 실패: {e}")
+
+        return set()
+
+def check_file_exists_in_onedrive(property_type: str, year: int, month: int, onedrive_files: set = None) -> bool:
 
     """OneDrive에서 파일 존재 여부 확인"""
 
@@ -292,30 +340,45 @@ def check_file_exists_in_onedrive(property_type: str, year: int, month: int) -> 
 
     
 
-    try:
+    # 파일명 생성
 
-        folder_name = sanitize_folder_name(property_type)
+    filename = f"{property_type} {year:04d}{month:02d}.xlsx"
 
-        filename = f"{property_type} {year:04d}{month:02d}.xlsx"
+    
 
-        remote_path = f"{ONEDRIVE_REMOTE}/{folder_name}/{filename}"
+    # 파일 목록이 제공된 경우 사용, 아니면 직접 확인
 
-        
+    if onedrive_files is not None:
 
-        # rclone으로 파일 존재 확인
+        return filename in onedrive_files
 
-        cmd = ["rclone", "lsf", remote_path]
+    else:
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        # 직접 확인 (느릴 수 있음)
 
-        
-        return result.returncode == 0 and result.stdout.strip() != ""
+        try:
 
-    except Exception as e:
+            folder_name = sanitize_folder_name(property_type)
 
-        log(f"  ⚠️  OneDrive 파일 확인 실패: {e}")
+            remote_path = f"{ONEDRIVE_REMOTE}/{folder_name}/{filename}"
 
-        return False
+            
+
+            # rclone으로 파일 존재 확인
+
+            cmd = ["rclone", "lsf", remote_path]
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
+            
+
+            return result.returncode == 0 and result.stdout.strip() != ""
+
+        except Exception as e:
+
+            log(f"  ⚠️  OneDrive 파일 확인 실패: {e}")
+
+            return False
 
 def build_driver():
 
@@ -385,33 +448,91 @@ def build_driver():
 
         driver_path = ChromeDriverManager().install()
 
-        # driver_path가 디렉토리인 경우 실행 파일 찾기
-
         driver_path_obj = Path(driver_path)
+
+        
+
+        # 디렉토리인 경우 실행 파일 찾기
 
         if driver_path_obj.is_dir():
 
-            # chromedriver 실행 파일 찾기
+            log(f"  🔍 ChromeDriver 디렉토리에서 실행 파일 찾기: {driver_path}")
 
-            chromedriver_files = list(driver_path_obj.glob("chromedriver*"))
+            
 
-            # 실행 파일만 필터링 (확장자 없거나 .sh가 아닌 것)
+            # 우선순위: 1) chromedriver (확장자 없음), 2) chromedriver.exe
 
-            executable_files = [f for f in chromedriver_files if not f.name.endswith('.sh') and not f.name.endswith('.txt') and 'NOTICES' not in f.name]
+            candidates = [
 
-            if executable_files:
+                driver_path_obj / "chromedriver",
 
-                driver_path = str(executable_files[0].absolute())
+                driver_path_obj / "chromedriver.exe",
+
+            ]
+
+            
+
+            # 디렉토리 내 모든 파일 확인
+
+            for candidate in candidates:
+
+                if candidate.exists() and candidate.is_file():
+
+                    # 실행 권한 확인 (Unix/Linux)
+
+                    try:
+
+                        if os.access(candidate, os.X_OK) or candidate.suffix == '.exe':
+
+                            driver_path = str(candidate.absolute())
+
+                            log(f"  ✅ ChromeDriver 실행 파일 발견: {driver_path}")
+
+                            break
+
+                    except:
+
+                        pass
 
             else:
 
-                # chromedriver 파일을 직접 찾기
+                # 후보가 없으면 디렉토리 내 모든 파일 검색 (NOTICES 제외)
 
-                chromedriver_path = driver_path_obj / "chromedriver"
+                all_files = list(driver_path_obj.iterdir())
 
-                if chromedriver_path.exists():
+                executable_files = []
 
-                    driver_path = str(chromedriver_path.absolute())
+                for f in all_files:
+
+                    if f.is_file():
+
+                        # NOTICES, .txt, .sh 파일 제외
+
+                        if ('NOTICES' not in f.name.upper() and 
+
+                            not f.name.endswith('.txt') and 
+
+                            not f.name.endswith('.sh') and
+
+                            f.suffix != '.md'):
+
+                            # chromedriver가 이름에 포함된 파일 우선
+
+                            if 'chromedriver' in f.name.lower():
+
+                                executable_files.insert(0, f)
+
+                            else:
+
+                                executable_files.append(f)
+
+                
+
+                if executable_files:
+
+                    driver_path = str(executable_files[0].absolute())
+
+                    log(f"  ✅ ChromeDriver 파일 발견: {driver_path}")
 
                 else:
 
@@ -419,13 +540,17 @@ def build_driver():
 
                     parent_chromedriver = driver_path_obj.parent / "chromedriver"
 
-                    if parent_chromedriver.exists():
+                    if parent_chromedriver.exists() and parent_chromedriver.is_file():
 
                         driver_path = str(parent_chromedriver.absolute())
 
+                        log(f"  ✅ 상위 디렉토리에서 ChromeDriver 발견: {driver_path}")
+
                     else:
 
-                        log(f"  ⚠️  ChromeDriver 실행 파일을 찾을 수 없습니다: {driver_path}")
+                        log(f"  ❌ ChromeDriver 실행 파일을 찾을 수 없습니다: {driver_path}")
+
+                        log(f"  📁 디렉토리 내용: {[f.name for f in all_files]}")
 
                         raise RuntimeError(f"ChromeDriver executable not found in {driver_path}")
 
@@ -1051,7 +1176,7 @@ def save_progress(progress: dict):
 
         sync_progress_to_onedrive()
 
-def is_already_downloaded(property_type: str, year: int, month: int) -> bool:
+def is_already_downloaded(property_type: str, year: int, month: int, onedrive_files: set = None) -> bool:
 
     """이미 다운로드된 파일인지 확인 - 로컬과 OneDrive 모두 확인"""
 
@@ -1060,6 +1185,7 @@ def is_already_downloaded(property_type: str, year: int, month: int) -> bool:
     filename = f"{property_type} {year:04d}{month:02d}.xlsx"
 
     
+
     # 로컬 파일 확인
 
     local_path = DOWNLOAD_DIR / folder_name / filename
@@ -1070,11 +1196,11 @@ def is_already_downloaded(property_type: str, year: int, month: int) -> bool:
 
     
 
-    # CI 환경에서 OneDrive 확인
+    # CI 환경에서 OneDrive 확인 (파일 목록이 제공된 경우 사용)
 
     if IS_CI and ONEDRIVE_REMOTE:
 
-        return check_file_exists_in_onedrive(property_type, year, month)
+        return check_file_exists_in_onedrive(property_type, year, month, onedrive_files)
 
     
 
@@ -1108,7 +1234,7 @@ def check_if_all_historical_complete(progress: dict) -> bool:
 
     return True
 
-def download_single_month_with_retry(driver, property_type: str, start_date: date, end_date: date, max_retries: int = 3) -> bool:
+def download_single_month_with_retry(driver, property_type: str, start_date: date, end_date: date, max_retries: int = 3, onedrive_files: set = None) -> bool:
 
     """단일 월 다운로드 - 재시도 포함"""
 
@@ -1128,7 +1254,7 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
 
     # 이미 다운로드됨?
 
-    if is_already_downloaded(property_type, year, month):
+    if is_already_downloaded(property_type, year, month, onedrive_files):
 
         log(f"  ⏭️  이미 존재함, 스킵")
 
@@ -1458,6 +1584,16 @@ def main():
 
             
 
+            # CI 환경에서 OneDrive 파일 목록 가져오기 (한 번만)
+
+            onedrive_files = None
+
+            if IS_CI and ONEDRIVE_REMOTE:
+
+                onedrive_files = list_files_in_onedrive_folder(property_type)
+
+            
+
             # 탭 선택
 
             if not select_property_tab(driver, property_type):
@@ -1532,7 +1668,7 @@ def main():
 
                 try:
 
-                    success = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3)
+                    success = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3, onedrive_files=onedrive_files)
 
                 except Exception as e:
 
