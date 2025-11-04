@@ -83,6 +83,14 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
     
     existing = {}
     
+    # 먼저 루트 폴더 정보 확인
+    try:
+        root_info = service.files().get(fileId=folder_id, fields='id, name, mimeType').execute()
+        log(f"   📂 루트 폴더 이름: {root_info.get('name', 'Unknown')}")
+        log(f"   📂 루트 폴더 타입: {root_info.get('mimeType', 'Unknown')}")
+    except Exception as e:
+        log(f"   ⚠️  루트 폴더 정보 조회 실패: {e}")
+    
     # 폴더 목록 조회 (페이지네이션 처리)
     query = f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
     folders = []
@@ -95,26 +103,32 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
             results = service.files().list(
                 q=query,
                 spaces='drive',
-                fields='nextPageToken, files(id, name)',
+                fields='nextPageToken, files(id, name, mimeType)',
                 pageSize=100,
                 pageToken=page_token
             ).execute()
         except Exception as e:
             log(f"   ❌ 폴더 목록 조회 실패: {e}")
+            import traceback
+            traceback.print_exc()
             raise
         
-        folders.extend(results.get('files', []))
+        page_folders = results.get('files', [])
+        folders.extend(page_folders)
+        log(f"   📄 페이지: {len(page_folders)}개 폴더 (누적: {len(folders)}개)")
+        
         page_token = results.get('nextPageToken')
         if not page_token:
             break
     
-    log(f"   📂 {len(folders)}개 폴더 발견")
+    log(f"   📂 총 {len(folders)}개 폴더 발견")
     for f in folders:
-        log(f"      - {f['name']} (ID: {f['id']})")
+        log(f"      - {f['name']} (ID: {f['id']}, Type: {f.get('mimeType', 'Unknown')})")
     log("")
     
     if len(folders) == 0:
         log("   ⚠️  폴더가 없습니다. 폴더 ID가 올바른지 확인하세요.")
+        log("   💡 루트 폴더 ID를 직접 확인하거나, 서비스 계정에 폴더 접근 권한이 있는지 확인하세요.")
         return {}
     
     for folder in folders:
@@ -124,7 +138,8 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
         log(f"   📁 '{folder_name}' 폴더 스캔 중... (ID: {folder_id_sub})")
         
         # 각 폴더의 파일 목록 (페이지네이션 처리)
-        query = f"'{folder_id_sub}' in parents and trashed=false"
+        # 폴더는 제외하고 파일만 조회
+        query = f"'{folder_id_sub}' in parents and mimeType!='application/vnd.google-apps.folder' and trashed=false"
         files = []
         page_token = None
         page_num = 0
@@ -135,18 +150,22 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
                 results = service.files().list(
                     q=query,
                     spaces='drive',
-                    fields='nextPageToken, files(id, name, size, modifiedTime)',
+                    fields='nextPageToken, files(id, name, size, modifiedTime, mimeType)',
                     pageSize=1000,
                     pageToken=page_token,
                     orderBy='name'
                 ).execute()
             except Exception as e:
                 log(f"      ❌ 페이지 {page_num} 조회 실패: {e}")
+                import traceback
+                traceback.print_exc()
                 break
             
             page_files = results.get('files', [])
-            files.extend(page_files)
-            log(f"      페이지 {page_num}: {len(page_files)}개 파일")
+            # 실제 파일만 필터링 (Google Docs 등 제외)
+            actual_files = [f for f in page_files if f.get('mimeType') != 'application/vnd.google-apps.folder']
+            files.extend(actual_files)
+            log(f"      페이지 {page_num}: {len(actual_files)}개 파일 (총 {len(files)}개)")
             
             page_token = results.get('nextPageToken')
             if not page_token:
@@ -181,6 +200,9 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
                     log(f"      샘플: {', '.join(sample_files[:5])}")
             else:
                 log(f"      ⚠️  날짜 파싱 가능한 파일 없음")
+                # 파싱 실패한 파일명 샘플 출력
+                sample_bad = list(file_names)[:5]
+                log(f"      파일명 샘플: {', '.join(sample_bad)}")
         else:
             log(f"   ⚠️  {folder_name}: (파일 없음)")
         log("")
@@ -199,11 +221,11 @@ def check_existing_files(service_account_path: str, folder_id: str):
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump({k: sorted(list(v)) for k, v in existing.items()}, f, indent=2, ensure_ascii=False)
     
-    log(f"💾 기존 파일 목록 저장: {output_file}")
+    log(f"💾 기존 파일 목록 저장: {output_file.absolute()}")
     
     # 통계
     total_files = sum(len(files) for files in existing.values())
-    log(f"📊 전체 {total_files}개 파일")
+    log(f"📊 전체 {total_files}개 파일, {len(existing)}개 폴더")
     log("")
     
     # 각 폴더별 상세 정보
@@ -225,6 +247,8 @@ def check_existing_files(service_account_path: str, folder_id: str):
                 log(f"   최초: {parsed_files[0][1]} ({parsed_files[0][0][1]}-{parsed_files[0][0][2]:02d})")
                 log(f"   최신: {parsed_files[-1][1]} ({parsed_files[-1][0][1]}-{parsed_files[-1][0][2]:02d})")
                 log(f"   범위: {parsed_files[0][0][1]}{parsed_files[0][0][2]:02d} ~ {parsed_files[-1][0][1]}{parsed_files[-1][0][2]:02d}")
+            else:
+                log(f"   ⚠️  날짜 파싱 가능한 파일 없음")
         else:
             log(f"\n📁 {folder_name}: (파일 없음)")
     log("")
@@ -245,13 +269,20 @@ def upload_to_drive(service_account_path: str, folder_id: str, local_dir: Path):
         with open(existing_file, 'r', encoding='utf-8') as f:
             existing_files = json.load(f)
             existing_files = {k: set(v) for k, v in existing_files.items()}
-        log("📋 기존 파일 목록 로드됨\n")
+        log("📋 기존 파일 목록 로드됨")
+        total = sum(len(files) for files in existing_files.values())
+        log(f"   {len(existing_files)}개 폴더, {total}개 파일\n")
     else:
         log("⚠️  기존 파일 목록 없음 - 모든 파일 업로드\n")
         existing_files = {}
     
     if not local_dir.exists():
-        log(f"❌ 디렉토리가 없습니다: {local_dir}")
+        log(f"❌ 디렉토리가 없습니다: {local_dir.absolute()}")
+        log(f"   현재 작업 디렉토리: {Path.cwd().absolute()}")
+        log(f"   존재하는 디렉토리 목록:")
+        for p in Path.cwd().iterdir():
+            if p.is_dir():
+                log(f"      - {p.name}/")
         return
     
     uploaded_count = 0
@@ -259,38 +290,45 @@ def upload_to_drive(service_account_path: str, folder_id: str, local_dir: Path):
     skipped_count = 0
     
     # output 폴더의 모든 하위 폴더 순회
-    for folder_path in sorted(local_dir.iterdir()):
-        if not folder_path.is_dir():
-            continue
-        
+    subdirs = [d for d in sorted(local_dir.iterdir()) if d.is_dir()]
+    log(f"📁 로컬 하위 폴더: {len(subdirs)}개")
+    for folder_path in subdirs:
         folder_name = folder_path.name
-        log(f"📁 처리 중: {folder_name}")
+        log(f"\n📁 처리 중: {folder_name}")
         
         # Drive에서 해당 폴더 찾기 또는 생성
         query = f"name='{folder_name}' and '{folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
-        results = service.files().list(
-            q=query,
-            spaces='drive',
-            fields='files(id, name)'
-        ).execute()
-        items = results.get('files', [])
+        try:
+            results = service.files().list(
+                q=query,
+                spaces='drive',
+                fields='files(id, name)'
+            ).execute()
+            items = results.get('files', [])
+        except Exception as e:
+            log(f"   ❌ 폴더 검색 실패: {e}")
+            continue
         
         if items:
             drive_folder_id = items[0]['id']
             log(f"   📂 기존 폴더 사용 (ID: {drive_folder_id})")
         else:
             # 폴더 생성
-            folder_metadata = {
-                'name': folder_name,
-                'mimeType': 'application/vnd.google-apps.folder',
-                'parents': [folder_id]
-            }
-            folder_file = service.files().create(
-                body=folder_metadata,
-                fields='id'
-            ).execute()
-            drive_folder_id = folder_file.get('id')
-            log(f"   📂 새 폴더 생성 (ID: {drive_folder_id})")
+            try:
+                folder_metadata = {
+                    'name': folder_name,
+                    'mimeType': 'application/vnd.google-apps.folder',
+                    'parents': [folder_id]
+                }
+                folder_file = service.files().create(
+                    body=folder_metadata,
+                    fields='id'
+                ).execute()
+                drive_folder_id = folder_file.get('id')
+                log(f"   📂 새 폴더 생성 (ID: {drive_folder_id})")
+            except Exception as e:
+                log(f"   ❌ 폴더 생성 실패: {e}")
+                continue
         
         # 기존 파일 목록
         existing_in_folder = existing_files.get(folder_name, set())
@@ -299,6 +337,10 @@ def upload_to_drive(service_account_path: str, folder_id: str, local_dir: Path):
         # 폴더 안의 파일들 업로드
         excel_files = sorted(folder_path.glob('*.xlsx'))
         log(f"   📦 업로드 대상: {len(excel_files)}개")
+        
+        if len(excel_files) == 0:
+            log(f"   ⚠️  파일이 없습니다")
+            continue
         
         for file_path in excel_files:
             file_name = file_path.name
@@ -312,12 +354,16 @@ def upload_to_drive(service_account_path: str, folder_id: str, local_dir: Path):
             
             # Drive에서 파일 확인 (혹시 모를 경우 대비)
             query = f"name='{file_name}' and '{drive_folder_id}' in parents and trashed=false"
-            results = service.files().list(
-                q=query,
-                spaces='drive',
-                fields='files(id, name, size)'
-            ).execute()
-            items = results.get('files', [])
+            try:
+                results = service.files().list(
+                    q=query,
+                    spaces='drive',
+                    fields='files(id, name, size)'
+                ).execute()
+                items = results.get('files', [])
+            except Exception as e:
+                log(f"   ❌ 파일 검색 실패: {file_name} - {e}")
+                continue
             
             if items:
                 # 기존 파일이 있으면 크기 비교
@@ -326,31 +372,39 @@ def upload_to_drive(service_account_path: str, folder_id: str, local_dir: Path):
                 
                 # 크기가 다르면 업데이트
                 if existing_size != file_size:
-                    file_id = existing_file_obj['id']
-                    media = MediaFileUpload(str(file_path), resumable=True)
-                    service.files().update(
-                        fileId=file_id,
-                        media_body=media
-                    ).execute()
-                    log(f"   ✅ 업데이트: {file_name} ({file_size:,} bytes)")
-                    updated_count += 1
+                    try:
+                        file_id = existing_file_obj['id']
+                        media = MediaFileUpload(str(file_path), resumable=True)
+                        service.files().update(
+                            fileId=file_id,
+                            media_body=media
+                        ).execute()
+                        log(f"   ✅ 업데이트: {file_name} ({file_size:,} bytes)")
+                        updated_count += 1
+                    except Exception as e:
+                        log(f"   ❌ 업데이트 실패: {file_name} - {e}")
                 else:
                     log(f"   ⏭️  스킵: {file_name} (동일)")
                     skipped_count += 1
             else:
                 # 새 파일 업로드
-                file_metadata = {
-                    'name': file_name,
-                    'parents': [drive_folder_id]
-                }
-                media = MediaFileUpload(str(file_path), resumable=True)
-                service.files().create(
-                    body=file_metadata,
-                    media_body=media,
-                    fields='id'
-                ).execute()
-                log(f"   ✅ 업로드: {file_name} ({file_size:,} bytes)")
-                uploaded_count += 1
+                try:
+                    file_metadata = {
+                        'name': file_name,
+                        'parents': [drive_folder_id]
+                    }
+                    media = MediaFileUpload(str(file_path), resumable=True)
+                    service.files().create(
+                        body=file_metadata,
+                        media_body=media,
+                        fields='id'
+                    ).execute()
+                    log(f"   ✅ 업로드: {file_name} ({file_size:,} bytes)")
+                    uploaded_count += 1
+                except Exception as e:
+                    log(f"   ❌ 업로드 실패: {file_name} - {e}")
+                    import traceback
+                    traceback.print_exc()
         
         log("")
     
@@ -387,6 +441,7 @@ def main():
     
     if not Path(service_account_path).exists():
         log(f"❌ 서비스 계정 파일이 없습니다: {service_account_path}")
+        log(f"   현재 디렉토리: {Path.cwd().absolute()}")
         sys.exit(1)
     
     log("=" * 60)
@@ -395,13 +450,14 @@ def main():
     if folder_id_raw != folder_id:
         log(f"   원본: {folder_id_raw}")
     log(f"☁️  폴더 ID: {folder_id}")
+    log(f"📁 서비스 계정: {service_account_path}")
     log("")
     
     try:
         if args.check_existing:
             check_existing_files(service_account_path, folder_id)
         elif args.upload:
-            log(f"📁 로컬: {local_dir.absolute()}")
+            log(f"📁 로컬 디렉토리: {local_dir.absolute()}")
             log("")
             upload_to_drive(service_account_path, folder_id, local_dir)
         else:
