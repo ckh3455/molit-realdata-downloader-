@@ -37,6 +37,16 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y google-chrome-stable
     
+    - name: Install ChromeDriver
+      run: |
+        CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+\.\d+')
+        CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION%.*}")
+        wget -q "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip" -O /tmp/chromedriver.zip
+        unzip -q /tmp/chromedriver.zip -d /tmp
+        sudo mv /tmp/chromedriver /usr/local/bin/chromedriver
+        sudo chmod +x /usr/local/bin/chromedriver
+        rm /tmp/chromedriver.zip
+    
     - name: Install rclone
       run: |
         curl https://rclone.org/install.sh | sudo bash
@@ -69,6 +79,8 @@ jobs:
       env:
         CI: "1"
         ONEDRIVE_REMOTE: "onedrive:office work/부동산 실거래 데이터"
+        CHROMEDRIVER_BIN: "/usr/local/bin/chromedriver"
+        CHROME_BIN: "/usr/bin/google-chrome"
       run: |
         python download_realdata.py --update-mode
     
