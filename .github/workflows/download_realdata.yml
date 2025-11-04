@@ -54,9 +54,19 @@ jobs:
     - name: Configure rclone
       run: |
         mkdir -p ~/.config/rclone
-        echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
-      env:
-        RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        cat > ~/.config/rclone/rclone.conf << 'EOF'
+        ${{ secrets.RCLONE_CONFIG }}
+        EOF
+        # 설정 파일 확인
+        if [ ! -f ~/.config/rclone/rclone.conf ]; then
+          echo "Error: rclone.conf file was not created"
+          exit 1
+        fi
+        echo "rclone configuration file created successfully"
+    
+    - name: Verify rclone configuration
+      run: |
+        rclone listremotes || echo "Warning: Could not list remotes"
     
     - name: Install Python dependencies
       run: |
@@ -79,7 +89,11 @@ jobs:
     - name: Upload progress file to OneDrive
       if: always()
       run: |
-        rclone copy download_progress.json "onedrive:office work/부동산 실거래 데이터/" --no-check-dest || echo "Failed to upload progress file"
+        if [ -f download_progress.json ]; then
+          rclone copy download_progress.json "onedrive:office work/부동산 실거래 데이터/" --no-check-dest || echo "Failed to upload progress file"
+        else
+          echo "download_progress.json not found"
+        fi
     
     - name: Upload logs as artifact
       if: always()
