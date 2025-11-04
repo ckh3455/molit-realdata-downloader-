@@ -69,7 +69,7 @@ jobs:
     
     - name: Create service account JSON file
       env:
-        SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+        GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
       run: |
         python -c "
         import json
@@ -77,9 +77,9 @@ jobs:
         import sys
         
         # Secret에서 JSON 가져오기
-        json_str = os.environ.get('SERVICE_ACCOUNT_JSON', '')
+        json_str = os.environ.get('GCP_SERVICE_ACCOUNT_KEY', '')
         if not json_str:
-            print('❌ SERVICE_ACCOUNT_JSON이 비어있습니다', file=sys.stderr)
+            print('❌ GCP_SERVICE_ACCOUNT_KEY가 비어있습니다', file=sys.stderr)
             sys.exit(1)
         
         # JSON 파싱하여 검증
@@ -100,7 +100,7 @@ jobs:
     - name: Check existing files in Google Drive
       env:
         SERVICE_ACCOUNT_JSON: service-account.json
-        GDRIVE_FOLDER_ID: "1x3lHLwrixnqVFpUoxkEzqgmcn19Jhw19"
+        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
       run: |
         python upload_to_gdrive.py --check-existing || echo "⚠️ 기존 파일 확인 실패 (처음 실행일 수 있음)"
     
@@ -110,7 +110,7 @@ jobs:
         CHROMEDRIVER_BIN: "/usr/local/bin/chromedriver"
         CHROME_BIN: "/usr/bin/google-chrome"
         SERVICE_ACCOUNT_JSON: service-account.json
-        GDRIVE_FOLDER_ID: "1x3lHLwrixnqVFpUoxkEzqgmcn19Jhw19"
+        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
       run: |
         python download_realdata.py --update-mode || echo "⚠️ 다운로드 스크립트 실패"
     
@@ -118,7 +118,7 @@ jobs:
       if: always()
       env:
         SERVICE_ACCOUNT_JSON: service-account.json
-        GDRIVE_FOLDER_ID: "1x3lHLwrixnqVFpUoxkEzqgmcn19Jhw19"
+        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         OUTPUT_DIR: "output"
       run: |
         python upload_to_gdrive.py --upload || echo "⚠️ Google Drive 업로드 실패"
