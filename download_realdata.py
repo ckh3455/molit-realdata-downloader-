@@ -282,6 +282,41 @@ def download_progress_from_onedrive() -> dict:
 
     return load_progress()
 
+def check_file_exists_in_onedrive(property_type: str, year: int, month: int) -> bool:
+
+    """OneDrive에서 파일 존재 여부 확인"""
+
+    if not IS_CI or not ONEDRIVE_REMOTE:
+
+        return False
+
+    
+
+    try:
+
+        folder_name = sanitize_folder_name(property_type)
+
+        filename = f"{property_type} {year:04d}{month:02d}.xlsx"
+
+        remote_path = f"{ONEDRIVE_REMOTE}/{folder_name}/{filename}"
+
+        
+
+        # rclone으로 파일 존재 확인
+
+        cmd = ["rclone", "lsf", remote_path]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
+        
+        return result.returncode == 0 and result.stdout.strip() != ""
+
+    except Exception as e:
+
+        log(f"  ⚠️  OneDrive 파일 확인 실패: {e}")
+
+        return False
+
 def build_driver():
 
     """크롬 드라이버 생성"""
@@ -348,7 +383,67 @@ def build_driver():
 
         from webdriver_manager.chrome import ChromeDriverManager
 
-        service = Service(ChromeDriverManager().install())
+        driver_path = ChromeDriverManager().install()
+
+        # driver_path가 디렉토리인 경우 실행 파일 찾기
+
+        driver_path_obj = Path(driver_path)
+
+        if driver_path_obj.is_dir():
+
+            # chromedriver 실행 파일 찾기
+
+            chromedriver_files = list(driver_path_obj.glob("chromedriver*"))
+
+            # 실행 파일만 필터링 (확장자 없거나 .sh가 아닌 것)
+
+            executable_files = [f for f in chromedriver_files if not f.name.endswith('.sh') and not f.name.endswith('.txt') and 'NOTICES' not in f.name]
+
+            if executable_files:
+
+                driver_path = str(executable_files[0].absolute())
+
+            else:
+
+                # chromedriver 파일을 직접 찾기
+
+                chromedriver_path = driver_path_obj / "chromedriver"
+
+                if chromedriver_path.exists():
+
+                    driver_path = str(chromedriver_path.absolute())
+
+                else:
+
+                    # 상위 디렉토리에서 찾기
+
+                    parent_chromedriver = driver_path_obj.parent / "chromedriver"
+
+                    if parent_chromedriver.exists():
+
+                        driver_path = str(parent_chromedriver.absolute())
+
+                    else:
+
+                        log(f"  ⚠️  ChromeDriver 실행 파일을 찾을 수 없습니다: {driver_path}")
+
+                        raise RuntimeError(f"ChromeDriver executable not found in {driver_path}")
+
+        else:
+
+            # 이미 파일 경로인 경우
+
+            if not driver_path_obj.exists():
+
+                raise RuntimeError(f"ChromeDriver not found at {driver_path}")
+
+            driver_path = str(driver_path_obj.absolute())
+
+        
+
+        service = Service(driver_path)
+
+        log(f"  📦 ChromeDriver 경로: {driver_path}")
 
     
 
@@ -958,21 +1053,30 @@ def save_progress(progress: dict):
 
 def is_already_downloaded(property_type: str, year: int, month: int) -> bool:
 
-    """이미 다운로드된 파일인지 확인"""
+    """이미 다운로드된 파일인지 확인 - 로컬과 OneDrive 모두 확인"""
 
-    # CI 환경에서는 OneDrive에서 확인하지 않음 (복잡도 문제)
+    folder_name = sanitize_folder_name(property_type)
 
-    # 로컬에서는 파일 존재 여부 확인
+    filename = f"{property_type} {year:04d}{month:02d}.xlsx"
 
-    if not IS_CI:
+    
+    # 로컬 파일 확인
 
-        folder_name = sanitize_folder_name(property_type)
+    local_path = DOWNLOAD_DIR / folder_name / filename
 
-        filename = f"{property_type} {year:04d}{month:02d}.xlsx"
+    if local_path.exists():
 
-        dest_path = DOWNLOAD_DIR / folder_name / filename
+        return True
 
-        return dest_path.exists()
+    
+
+    # CI 환경에서 OneDrive 확인
+
+    if IS_CI and ONEDRIVE_REMOTE:
+
+        return check_file_exists_in_onedrive(property_type, year, month)
+
+    
 
     return False
 
@@ -1406,7 +1510,7 @@ def main():
 
                 
 
-                # 이미 완료한 달 스킵
+                # 이미 완료한 달 스킵 (progress 파일 기반)
 
                 if last_completed and month_key <= last_completed:
 
