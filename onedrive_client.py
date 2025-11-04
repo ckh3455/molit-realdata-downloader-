@@ -1,349 +1,349 @@
+# -*- coding: utf-8 -*-
 """
 Microsoft Graph API를 사용한 OneDrive 클라이언트
 """
 import os
 import json
-import requests
+import time
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-import logging
-
-try:
-    from msal import ConfidentialClientApplication, PublicClientApplication
-except ImportError:
-    raise ImportError("msal 패키지가 필요합니다. pip install msal로 설치하세요.")
-
-logger = logging.getLogger(__name__)
+from typing import Optional, List, Set
+from msal import ConfidentialClientApplication
+import requests
 
 
 class OneDriveClient:
     """Microsoft Graph API를 사용한 OneDrive 클라이언트"""
     
-    GRAPH_API_ENDPOINT = "https://graph.microsoft.com/v1.0"
-    
-    def __init__(
-        self,
-        client_id: str,
-        client_secret: Optional[str] = None,
-        tenant_id: Optional[str] = None,
-        authority: Optional[str] = None,
-        use_device_code: bool = False
-    ):
+    def __init__(self, client_id: str, client_secret: str, tenant_id: str):
         """
-        OneDrive 클라이언트 초기화
-        
         Args:
-            client_id: Azure AD 앱 등록의 클라이언트 ID
-            client_secret: 클라이언트 시크릿 (서비스 주체 사용 시)
-            tenant_id: 테넌트 ID (서비스 주체 사용 시)
-            authority: 인증 기관 URL (기본값: https://login.microsoftonline.com/{tenant_id})
-            use_device_code: Device Code Flow 사용 여부 (클라이언트 시크릿 없을 때)
+            client_id: Azure AD 앱 등록의 Client ID
+            client_secret: Azure AD 앱 등록의 Client Secret
+            tenant_id: Azure AD Tenant ID
         """
         self.client_id = client_id
         self.client_secret = client_secret
-        self.tenant_id = tenant_id or "common"
+        self.tenant_id = tenant_id
+        self.authority = f"https://login.microsoftonline.com/{tenant_id}"
+        self.scope = ["https://graph.microsoft.com/.default"]
+        self.graph_endpoint = "https://graph.microsoft.com/v1.0"
         
-        if authority:
-            self.authority = authority
-        else:
-            self.authority = f"https://login.microsoftonline.com/{self.tenant_id}"
+        # MSAL 앱 생성
+        self.app = ConfidentialClientApplication(
+            client_id=self.client_id,
+            client_credential=self.client_secret,
+            authority=self.authority
+        )
         
-        self.use_device_code = use_device_code or (client_secret is None)
-        self.access_token: Optional[str] = None
-        
-        # 앱 초기화
-        if self.client_secret:
-            # 서비스 주체 방식 (Confidential Client)
-            self.app = ConfidentialClientApplication(
-                client_id=self.client_id,
-                client_credential=self.client_secret,
-                authority=self.authority
-            )
-        else:
-            # Device Code Flow 방식 (Public Client)
-            self.app = PublicClientApplication(
-                client_id=self.client_id,
-                authority=self.authority
-            )
+        self._access_token = None
+        self._token_expiry = 0
     
-    def authenticate(self, scopes: Optional[List[str]] = None) -> bool:
-        """
-        인증 및 액세스 토큰 획득
+    def _get_access_token(self) -> str:
+        """액세스 토큰 가져오기 (필요시 갱신)"""
+        if self._access_token and time.time() < self._token_expiry:
+            return self._access_token
         
-        Args:
-            scopes: 요청할 권한 범위 (기본값: Files.ReadWrite.All)
+        # 토큰 획득
+        result = self.app.acquire_token_for_client(scopes=self.scope)
         
-        Returns:
-            인증 성공 여부
-        """
-        if scopes is None:
-            scopes = ["Files.ReadWrite.All"]
+        if "access_token" not in result:
+            error = result.get("error_description", "알 수 없는 오류")
+            raise Exception(f"토큰 획득 실패: {error}")
         
-        # 기존 토큰 확인
-        accounts = self.app.get_accounts()
-        if accounts:
-            result = self.app.acquire_token_silent(scopes, account=accounts[0])
-            if result and "access_token" in result:
-                self.access_token = result["access_token"]
-                logger.info("기존 토큰으로 인증 성공")
-                return True
+        self._access_token = result["access_token"]
+        # 만료 시간 5분 전에 갱신하도록 설정
+        expires_in = result.get("expires_in", 3600)
+        self._token_expiry = time.time() + expires_in - 300
         
-        # 새 토큰 획득
-        if self.client_secret:
-            # 서비스 주체 방식
-            result = self.app.acquire_token_for_client(scopes=scopes)
-        else:
-            # Device Code Flow
-            flow = self.app.initiate_device_flow(scopes=scopes)
-            if "user_code" in flow:
-                print(f"디바이스 코드를 입력하세요: {flow['user_code']}")
-                print(f"URL: {flow['verification_uri']}")
-                result = self.app.acquire_token_by_device_flow(flow)
-            else:
-                logger.error(f"Device Code Flow 초기화 실패: {flow.get('error_description')}")
-                return False
-        
-        if result and "access_token" in result:
-            self.access_token = result["access_token"]
-            logger.info("인증 성공")
-            return True
-        else:
-            error = result.get("error", "Unknown error")
-            error_description = result.get("error_description", "")
-            logger.error(f"인증 실패: {error} - {error_description}")
-            return False
+        return self._access_token
     
-    def _get_headers(self) -> Dict[str, str]:
-        """API 요청 헤더 생성"""
-        if not self.access_token:
-            raise ValueError("액세스 토큰이 없습니다. authenticate()를 먼저 호출하세요.")
+    def _get_headers(self) -> dict:
+        """API 요청 헤더"""
+        token = self._get_access_token()
         return {
-            "Authorization": f"Bearer {self.access_token}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }
     
     def _get_item_path(self, folder_path: str) -> str:
-        """
-        OneDrive 폴더 경로를 Graph API 경로로 변환
-        
-        Args:
-            folder_path: 예) "office work/부동산 실거래 데이터/아파트"
-        
-        Returns:
-            API 경로: "me/drive/root:/office work/부동산 실거래 데이터/아파트:"
-        """
+        """OneDrive 경로를 Graph API 경로로 변환"""
         # 경로 정규화
-        path = folder_path.strip("/").replace("\\", "/")
-        return f"me/drive/root:/{path}:"
+        folder_path = folder_path.strip("/")
+        if not folder_path:
+            return "/drive/root"
+        
+        # 한글 경로 인코딩
+        parts = folder_path.split("/")
+        encoded_parts = []
+        for part in parts:
+            if part:
+                encoded_parts.append(part)
+        
+        if not encoded_parts:
+            return "/drive/root"
+        
+        # 경로 조합
+        path = "/" + "/".join(encoded_parts)
+        return f"/drive/root:{path}"
     
-    def list_files(self, folder_path: str = "root") -> List[Dict[str, Any]]:
+    def upload_file(self, local_path: Path, remote_path: str) -> bool:
         """
-        폴더 내 파일 목록 조회
+        파일 업로드
         
         Args:
-            folder_path: 조회할 폴더 경로 (기본값: root)
+            local_path: 로컬 파일 경로
+            remote_path: OneDrive 상대 경로 (예: "office work/부동산 실거래 데이터/아파트/파일명.xlsx")
         
         Returns:
-            파일/폴더 정보 리스트
+            성공 여부
         """
-        if folder_path == "root":
-            api_path = "me/drive/root/children"
-        else:
-            item_path = self._get_item_path(folder_path)
-            api_path = f"{item_path}/children"
-        
-        url = f"{self.GRAPH_API_ENDPOINT}/{api_path}"
-        headers = self._get_headers()
-        
-        files = []
-        while url:
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-            files.extend(data.get("value", []))
+        try:
+            if not local_path.exists():
+                print(f"  ❌ 파일 없음: {local_path}")
+                return False
             
-            # 다음 페이지 URL
-            url = data.get("@odata.nextLink")
+            # 파일 크기 확인
+            file_size = local_path.stat().st_size
+            if file_size == 0:
+                print(f"  ❌ 빈 파일: {local_path}")
+                return False
+            
+            # 경로 분리
+            path_parts = remote_path.replace("\\", "/").strip("/").split("/")
+            filename = path_parts[-1]
+            folder_path = "/".join(path_parts[:-1]) if len(path_parts) > 1 else ""
+            
+            # 폴더 경로 생성 (없으면)
+            if folder_path:
+                self._ensure_folder_exists(folder_path)
+                item_path = self._get_item_path(folder_path)
+            else:
+                item_path = "/drive/root"
+            
+            # 업로드 URL 가져오기
+            upload_url = f"{self.graph_endpoint}{item_path}:/{filename}:/createUploadSession"
+            
+            headers = self._get_headers()
+            
+            # 업로드 세션 생성
+            session_response = requests.post(
+                upload_url,
+                headers=headers,
+                json={
+                    "item": {
+                        "@microsoft.graph.conflictBehavior": "replace",
+                        "name": filename
+                    }
+                }
+            )
+            
+            if session_response.status_code not in [200, 201]:
+                print(f"  ❌ 업로드 세션 생성 실패: {session_response.status_code}")
+                print(f"     {session_response.text[:200]}")
+                return False
+            
+            upload_url_value = session_response.json()["uploadUrl"]
+            
+            # 파일 업로드 (5MB 이하면 한 번에)
+            if file_size <= 5 * 1024 * 1024:
+                # 작은 파일은 한 번에 업로드
+                with open(local_path, "rb") as f:
+                    upload_response = requests.put(
+                        upload_url_value,
+                        headers={"Content-Length": str(file_size)},
+                        data=f.read()
+                    )
+                
+                if upload_response.status_code in [200, 201]:
+                    print(f"  ✅ 업로드 완료: {remote_path}")
+                    return True
+                else:
+                    print(f"  ❌ 업로드 실패: {upload_response.status_code}")
+                    return False
+            else:
+                # 큰 파일은 청크 단위로 업로드
+                chunk_size = 4 * 1024 * 1024  # 4MB
+                with open(local_path, "rb") as f:
+                    offset = 0
+                    while offset < file_size:
+                        chunk_end = min(offset + chunk_size - 1, file_size - 1)
+                        chunk_data = f.read(chunk_size)
+                        
+                        chunk_headers = {
+                            "Content-Length": str(len(chunk_data)),
+                            "Content-Range": f"bytes {offset}-{chunk_end}/{file_size}"
+                        }
+                        
+                        chunk_response = requests.put(
+                            upload_url_value,
+                            headers=chunk_headers,
+                            data=chunk_data
+                        )
+                        
+                        if chunk_response.status_code not in [200, 201, 202]:
+                            print(f"  ❌ 청크 업로드 실패: {chunk_response.status_code}")
+                            return False
+                        
+                        offset = chunk_end + 1
+                
+                print(f"  ✅ 업로드 완료: {remote_path}")
+                return True
+                
+        except Exception as e:
+            print(f"  ❌ 업로드 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _ensure_folder_exists(self, folder_path: str) -> bool:
+        """폴더가 존재하는지 확인하고 없으면 생성"""
+        try:
+            parts = folder_path.replace("\\", "/").strip("/").split("/")
+            current_path = ""
+            
+            for part in parts:
+                if not part:
+                    continue
+                
+                if current_path:
+                    current_path = f"{current_path}/{part}"
+                else:
+                    current_path = part
+                
+                item_path = self._get_item_path(current_path)
+                check_url = f"{self.graph_endpoint}{item_path}"
+                
+                headers = self._get_headers()
+                check_response = requests.get(check_url, headers=headers)
+                
+                if check_response.status_code == 404:
+                    # 폴더 없음 - 생성
+                    parent_path = current_path.rsplit("/", 1)[0] if "/" in current_path else ""
+                    if parent_path:
+                        parent_item_path = self._get_item_path(parent_path)
+                    else:
+                        parent_item_path = "/drive/root"
+                    
+                    create_url = f"{self.graph_endpoint}{parent_item_path}:/children"
+                    
+                    create_response = requests.post(
+                        create_url,
+                        headers=headers,
+                        json={
+                            "name": part,
+                            "folder": {},
+                            "@microsoft.graph.conflictBehavior": "rename"
+                        }
+                    )
+                    
+                    if create_response.status_code not in [200, 201]:
+                        print(f"  ⚠️  폴더 생성 실패: {part} ({create_response.status_code})")
+                        # 계속 진행 (이미 존재할 수 있음)
+                
+        except Exception as e:
+            print(f"  ⚠️  폴더 확인/생성 오류: {e}")
+            # 계속 진행
         
-        return files
+        return True
+    
+    def list_files(self, folder_path: str) -> Set[str]:
+        """
+        폴더 내 파일 목록 가져오기
+        
+        Args:
+            folder_path: OneDrive 상대 경로
+        
+        Returns:
+            파일명 집합
+        """
+        try:
+            item_path = self._get_item_path(folder_path)
+            list_url = f"{self.graph_endpoint}{item_path}:/children"
+            
+            headers = self._get_headers()
+            files = set()
+            
+            while list_url:
+                response = requests.get(list_url, headers=headers)
+                
+                if response.status_code != 200:
+                    print(f"  ⚠️  파일 목록 조회 실패: {response.status_code}")
+                    break
+                
+                data = response.json()
+                items = data.get("value", [])
+                
+                for item in items:
+                    if "folder" not in item:  # 파일만
+                        files.add(item["name"])
+                
+                # 다음 페이지
+                list_url = data.get("@odata.nextLink")
+                if list_url:
+                    # 전체 URL이 아닌 경우 Graph 엔드포인트 추가
+                    if not list_url.startswith("http"):
+                        list_url = f"{self.graph_endpoint}{list_url}"
+            
+            return files
+            
+        except Exception as e:
+            print(f"  ⚠️  파일 목록 조회 오류: {e}")
+            return set()
     
     def file_exists(self, file_path: str) -> bool:
         """
         파일 존재 여부 확인
         
         Args:
-            file_path: 파일 경로 (예: "office work/부동산 실거래 데이터/아파트/파일명.xlsx")
+            file_path: OneDrive 상대 경로 (예: "office work/부동산 실거래 데이터/아파트/파일명.xlsx")
         
         Returns:
-            파일 존재 여부
+            존재 여부
         """
         try:
-            item_path = self._get_item_path(file_path)
-            url = f"{self.GRAPH_API_ENDPOINT}/{item_path}"
-            headers = self._get_headers()
+            path_parts = file_path.replace("\\", "/").strip("/").split("/")
+            filename = path_parts[-1]
+            folder_path = "/".join(path_parts[:-1]) if len(path_parts) > 1 else ""
             
-            response = requests.get(url, headers=headers)
-            return response.status_code == 200
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
+            files = self.list_files(folder_path)
+            return filename in files
+            
+        except Exception as e:
+            print(f"  ⚠️  파일 존재 확인 오류: {e}")
+            return False
+    
+    def download_file(self, remote_path: str, local_path: Path) -> bool:
+        """
+        파일 다운로드
+        
+        Args:
+            remote_path: OneDrive 상대 경로
+            local_path: 로컬 저장 경로
+        
+        Returns:
+            성공 여부
+        """
+        try:
+            path_parts = remote_path.replace("\\", "/").strip("/").split("/")
+            filename = path_parts[-1]
+            folder_path = "/".join(path_parts[:-1]) if len(path_parts) > 1 else ""
+            
+            item_path = self._get_item_path(remote_path)
+            download_url = f"{self.graph_endpoint}{item_path}:/content"
+            
+            headers = self._get_headers()
+            response = requests.get(download_url, headers=headers, stream=True)
+            
+            if response.status_code == 200:
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(local_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                return True
+            else:
+                print(f"  ❌ 다운로드 실패: {response.status_code}")
                 return False
-            raise
-    
-    def upload_file(
-        self,
-        local_file_path: str,
-        remote_file_path: str,
-        overwrite: bool = True
-    ) -> bool:
-        """
-        파일 업로드
-        
-        Args:
-            local_file_path: 로컬 파일 경로
-            remote_file_path: OneDrive 파일 경로 (예: "office work/부동산 실거래 데이터/아파트/파일명.xlsx")
-            overwrite: 기존 파일 덮어쓰기 여부
-        
-        Returns:
-            업로드 성공 여부
-        """
-        if not os.path.exists(local_file_path):
-            logger.error(f"로컬 파일이 없습니다: {local_file_path}")
-            return False
-        
-        # 파일 크기 확인
-        file_size = os.path.getsize(local_file_path)
-        
-        # 4MB 미만이면 단순 업로드
-        if file_size < 4 * 1024 * 1024:
-            return self._upload_file_simple(local_file_path, remote_file_path, overwrite)
-        else:
-            # 4MB 이상이면 세션 업로드
-            return self._upload_file_session(local_file_path, remote_file_path, overwrite)
-    
-    def _upload_file_simple(
-        self,
-        local_file_path: str,
-        remote_file_path: str,
-        overwrite: bool
-    ) -> bool:
-        """단순 업로드 (4MB 미만)"""
-        item_path = self._get_item_path(remote_file_path)
-        url = f"{self.GRAPH_API_ENDPOINT}/{item_path}/content"
-        
-        headers = self._get_headers()
-        headers.pop("Content-Type")  # 파일 업로드 시 Content-Type은 자동 설정
-        
-        with open(local_file_path, "rb") as f:
-            file_content = f.read()
-        
-        if not overwrite:
-            # 파일 존재 확인
-            if self.file_exists(remote_file_path):
-                logger.info(f"파일이 이미 존재하여 스킵: {remote_file_path}")
-                return True
-        
-        response = requests.put(url, headers=headers, data=file_content)
-        
-        if response.status_code in (200, 201):
-            logger.info(f"파일 업로드 성공: {remote_file_path}")
-            return True
-        else:
-            logger.error(f"파일 업로드 실패: {response.status_code} - {response.text}")
-            return False
-    
-    def _upload_file_session(
-        self,
-        local_file_path: str,
-        remote_file_path: str,
-        overwrite: bool
-    ) -> bool:
-        """세션 업로드 (4MB 이상)"""
-        # 1. 업로드 세션 생성
-        item_path = self._get_item_path(remote_file_path)
-        create_session_url = f"{self.GRAPH_API_ENDPOINT}/{item_path}/createUploadSession"
-        
-        headers = self._get_headers()
-        
-        file_size = os.path.getsize(local_file_path)
-        body = {
-            "item": {
-                "@microsoft.graph.conflictBehavior": "replace" if overwrite else "fail"
-            }
-        }
-        
-        response = requests.post(create_session_url, headers=headers, json=body)
-        if response.status_code != 200:
-            logger.error(f"업로드 세션 생성 실패: {response.status_code} - {response.text}")
-            return False
-        
-        upload_url = response.json()["uploadUrl"]
-        
-        # 2. 청크 단위로 업로드
-        chunk_size = 320 * 1024  # 320KB
-        with open(local_file_path, "rb") as f:
-            offset = 0
-            while offset < file_size:
-                chunk = f.read(chunk_size)
-                if not chunk:
-                    break
                 
-                chunk_end = offset + len(chunk) - 1
-                content_range = f"bytes {offset}-{chunk_end}/{file_size}"
-                
-                headers = {
-                    "Content-Length": str(len(chunk)),
-                    "Content-Range": content_range
-                }
-                
-                response = requests.put(upload_url, headers=headers, data=chunk)
-                
-                if response.status_code not in (200, 201, 202):
-                    logger.error(f"청크 업로드 실패: {response.status_code} - {response.text}")
-                    return False
-                
-                offset += len(chunk)
-        
-        logger.info(f"파일 업로드 성공 (세션): {remote_file_path}")
-        return True
-    
-    def create_folder(self, folder_path: str) -> bool:
-        """
-        폴더 생성
-        
-        Args:
-            folder_path: 생성할 폴더 경로
-        
-        Returns:
-            생성 성공 여부
-        """
-        # 부모 폴더와 폴더명 분리
-        parts = folder_path.strip("/").split("/")
-        if len(parts) == 1:
-            parent_path = "root"
-            folder_name = parts[0]
-        else:
-            parent_path = "/".join(parts[:-1])
-            folder_name = parts[-1]
-        
-        parent_item_path = self._get_item_path(parent_path) if parent_path != "root" else "me/drive/root"
-        url = f"{self.GRAPH_API_ENDPOINT}/{parent_item_path}/children"
-        
-        headers = self._get_headers()
-        body = {
-            "name": folder_name,
-            "folder": {},
-            "@microsoft.graph.conflictBehavior": "rename"
-        }
-        
-        response = requests.post(url, headers=headers, json=body)
-        
-        if response.status_code in (200, 201):
-            logger.info(f"폴더 생성 성공: {folder_path}")
-            return True
-        else:
-            # 이미 존재하는 경우는 성공으로 간주
-            if response.status_code == 409:
-                logger.info(f"폴더가 이미 존재함: {folder_path}")
-                return True
-            logger.error(f"폴더 생성 실패: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"  ❌ 다운로드 오류: {e}")
             return False
