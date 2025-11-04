@@ -37,6 +37,21 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y google-chrome-stable
     
+    - name: Install rclone
+      run: |
+        curl https://rclone.org/install.sh | sudo bash
+    
+    - name: Configure rclone
+      run: |
+        mkdir -p ~/.config/rclone
+        echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+        # 권한 설정
+        chmod 600 ~/.config/rclone/rclone.conf
+    
+    - name: Verify rclone configuration
+      run: |
+        rclone config show onedrive
+    
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
@@ -45,9 +60,25 @@ jobs:
     - name: Run download script
       env:
         CI: "1"
-        ONEDRIVE_BASE_FOLDER: "office work/부동산 실거래 데이터"
-        AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-        AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-        AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        ONEDRIVE_REMOTE: "onedrive:office work/부동산 실거래 데이터"
       run: |
         python download_realdata.py --update-mode
+    
+    - name: Upload progress file to OneDrive
+      if: always()
+      run: |
+        if [ -f download_progress.json ]; then
+          rclone copy download_progress.json "onedrive:office work/부동산 실거래 데이터/" --no-check-dest || echo "Failed to upload progress file"
+        else
+          echo "download_progress.json not found"
+        fi
+    
+    - name: Upload logs as artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: download-logs
+        path: |
+          *.log
+          download_progress.json
+        retention-days: 7
