@@ -44,8 +44,13 @@ jobs:
     - name: Configure rclone
       run: |
         mkdir -p ~/.config/rclone
-        echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+        cat > ~/.config/rclone/rclone.conf << 'EOF'
+        ${{ secrets.RCLONE_CONFIG }}
+        EOF
         chmod 600 ~/.config/rclone/rclone.conf
+        # 설정 파일 확인
+        echo "=== rclone config file ==="
+        cat ~/.config/rclone/rclone.conf
     
     - name: Verify rclone configuration
       run: |
