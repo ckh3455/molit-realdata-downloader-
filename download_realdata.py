@@ -1,25 +1,23 @@
 # -*- coding: utf-8 -*-
-
 """
 국토부 실거래가 데이터 월별 대량 다운로드
 - 재시도 로직 (15초 대기, 최대 3회)
 - 진행 상황 저장 및 재개
 - 100회 제한 대응 (다음날 자동 재개)
 - 업데이트 모드 (최근 1년만 갱신)
-- CI 환경에서만 rclone으로 OneDrive 업로드
+- Google Drive 기존 파일 체크
+
 파일명: download_realdata.py
 """
-
 import os
 import re
 import sys
 import json
 import time
 import argparse
-import subprocess
 from pathlib import Path
 from datetime import date, datetime, timedelta
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict, Set
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -33,13 +31,11 @@ IS_CI = os.getenv("CI", "") == "1"
 
 # 저장 폴더 (환경에 따라 자동 전환)
 if IS_CI:
-    # GitHub Actions: 로컬에 저장 후 rclone으로 업로드
+    # GitHub Actions: 테스트용 output 폴더
     DOWNLOAD_DIR = Path("output")
-    ONEDRIVE_REMOTE = os.getenv("ONEDRIVE_REMOTE", "onedrive:office work/부동산 실거래 데이터")
 else:
-    # 로컬 PC: OneDrive 경로에 직접 저장
+    # 로컬 PC: OneDrive 경로
     DOWNLOAD_DIR = Path(r"D:\OneDrive\office work\부동산 실거래 데이터")
-    ONEDRIVE_REMOTE = None
 
 # 임시 다운로드 폴더
 TEMP_DOWNLOAD_DIR = Path("_temp_downloads")
@@ -62,151 +58,50 @@ PROPERTY_TYPES = [
 # 진행 상황 파일
 PROGRESS_FILE = Path("download_progress.json")
 
+# Google Drive 기존 파일 목록
+EXISTING_FILES_JSON = Path("existing_files.json")
+
 # 임시 다운로드 폴더 생성
 TEMP_DOWNLOAD_DIR.mkdir(exist_ok=True)
-DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# Google Drive 기존 파일 캐시
+GDRIVE_EXISTING_FILES: Dict[str, Set[str]] = {}
+
 
 def log(msg: str, end="\n"):
     """로그 출력"""
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{timestamp}] {msg}", end=end, flush=True)
 
+
+def load_gdrive_existing_files():
+    """Google Drive 기존 파일 목록 로드"""
+    global GDRIVE_EXISTING_FILES
+    
+    if EXISTING_FILES_JSON.exists():
+        try:
+            with open(EXISTING_FILES_JSON, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                GDRIVE_EXISTING_FILES = {k: set(v) for k, v in data.items()}
+            
+            total = sum(len(files) for files in GDRIVE_EXISTING_FILES.values())
+            log(f"✅ Google Drive 기존 파일 로드: {total}개")
+            return True
+        except Exception as e:
+            log(f"⚠️  기존 파일 목록 로드 실패: {e}")
+    else:
+        log("⚠️  existing_files.json 없음 - 모든 파일 다운로드")
+    
+    return False
+
+
 def sanitize_folder_name(name: str) -> str:
     """폴더명에서 특수문자 제거"""
     return re.sub(r'[<>:"/\\|?*]', '_', name)
 
-def upload_to_onedrive(local_path: Path, remote_path: str) -> bool:
-    """CI 환경에서만 rclone으로 OneDrive에 업로드"""
-    if not IS_CI or not ONEDRIVE_REMOTE:
-        return True  # 로컬에서는 불필요 (이미 로컬 OneDrive 폴더에 저장됨)
-    
-    try:
-        log(f"  ☁️  OneDrive 업로드 시작: {remote_path}")
-        
-        cmd = [
-            "rclone", "copy",
-            str(local_path),
-            f"{ONEDRIVE_REMOTE}/{remote_path}",
-            "--progress",
-            "--transfers", "1",
-            "--checkers", "1"
-        ]
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        
-        if result.returncode == 0:
-            log(f"  ✅ OneDrive 업로드 완료")
-            return True
-        else:
-            log(f"  ❌ OneDrive 업로드 실패 (코드: {result.returncode})")
-            if result.stderr:
-                log(f"  오류: {result.stderr[:300]}")
-            return False
-            
-    except subprocess.TimeoutExpired:
-        log(f"  ⏱️  업로드 타임아웃")
-        return False
-    except Exception as e:
-        log(f"  ❌ 업로드 오류: {e}")
-        return False
-
-def sync_progress_to_onedrive() -> bool:
-    """CI 환경에서 진행 상황 파일을 OneDrive에 동기화"""
-    if not IS_CI or not ONEDRIVE_REMOTE:
-        return True
-    
-    try:
-        log("  ☁️  진행 상황 파일 동기화 중...")
-        cmd = [
-            "rclone", "copy",
-            str(PROGRESS_FILE),
-            f"{ONEDRIVE_REMOTE}/",
-            "--no-check-dest"
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        return result.returncode == 0
-    except Exception as e:
-        log(f"  ⚠️  진행 상황 동기화 실패: {e}")
-        return False
-
-def download_progress_from_onedrive() -> dict:
-    """CI 환경에서 OneDrive에서 진행 상황 파일 다운로드"""
-    if not IS_CI or not ONEDRIVE_REMOTE:
-        return {}
-    
-    try:
-        log("  ☁️  진행 상황 파일 다운로드 중...")
-        cmd = [
-            "rclone", "copy",
-            f"{ONEDRIVE_REMOTE}/{PROGRESS_FILE.name}",
-            ".",
-            "--no-check-dest"
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        
-        if result.returncode == 0 and PROGRESS_FILE.exists():
-            log("  ✅ 진행 상황 파일 다운로드 완료")
-        else:
-            log("  ℹ️  진행 상황 파일이 없습니다 (처음 실행)")
-    except Exception as e:
-        log(f"  ⚠️  진행 상황 다운로드 실패: {e}")
-    
-    return load_progress()
-
-def list_files_in_onedrive_folder(property_type: str) -> set:
-    """CI 환경에서 OneDrive 폴더의 파일 목록 가져오기"""
-    if not IS_CI or not ONEDRIVE_REMOTE:
-        # 로컬 환경에서는 로컬 파일 시스템에서 확인
-        folder_name = sanitize_folder_name(property_type)
-        folder_path = DOWNLOAD_DIR / folder_name
-        if folder_path.exists():
-            files = {f.name for f in folder_path.iterdir() if f.is_file()}
-            return files
-        return set()
-    
-    try:
-        folder_name = sanitize_folder_name(property_type)
-        remote_path = f"{ONEDRIVE_REMOTE}/{folder_name}/"
-        
-        cmd = ["rclone", "lsf", remote_path]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        
-        if result.returncode == 0:
-            files = {line.strip() for line in result.stdout.strip().split('\n') if line.strip()}
-            log(f"  📁 OneDrive에서 {len(files)}개 파일 발견: {property_type}")
-            return files
-        else:
-            return set()
-    except Exception as e:
-        log(f"  ⚠️  OneDrive 파일 목록 확인 실패: {e}")
-        return set()
-
-def check_file_exists_in_onedrive(property_type: str, year: int, month: int, onedrive_files: set = None) -> bool:
-    """CI 환경에서 OneDrive에서 파일 존재 여부 확인"""
-    if not IS_CI or not ONEDRIVE_REMOTE:
-        return False
-    
-    filename = f"{property_type} {year:04d}{month:02d}.xlsx"
-    
-    if onedrive_files is not None:
-        return filename in onedrive_files
-    
-    try:
-        folder_name = sanitize_folder_name(property_type)
-        remote_path = f"{ONEDRIVE_REMOTE}/{folder_name}/{filename}"
-        cmd = ["rclone", "lsf", remote_path]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        return result.returncode == 0 and result.stdout.strip() != ""
-    except:
-        return False
 
 def build_driver():
-    """크롬 드라이버 생성"""
+    """크롬 드라이버 생성 - 절대 수정 금지!"""
     opts = Options()
     if IS_CI:
         opts.add_argument("--headless=new")
@@ -247,6 +142,7 @@ def build_driver():
     driver = webdriver.Chrome(service=service, options=opts)
     return driver
 
+
 def try_accept_alert(driver, timeout=3.0) -> bool:
     """Alert 자동 수락 - 100건 제한 감지"""
     end_time = time.time() + timeout
@@ -269,23 +165,26 @@ def try_accept_alert(driver, timeout=3.0) -> bool:
             return True
         except Exception as e:
             if str(e) == "DOWNLOAD_LIMIT_100":
-                raise
+                raise  # 100건 제한은 상위로 전달
             time.sleep(0.2)
     return False
 
+
 def select_property_tab(driver, tab_name: str) -> bool:
-    """부동산 종목 탭 선택 - 강화 버전"""
+    """부동산 종목 탭 선택 - 절대 수정 금지!"""
     log(f"  탭 선택: {tab_name}")
     
     # xls.do 페이지인지 확인
     if "xls.do" not in driver.current_url:
         log(f"  🔄 페이지 로딩...")
         driver.get(MOLIT_URL)
-        time.sleep(5)
+        time.sleep(5)  # 페이지 로딩 대기 증가
         try_accept_alert(driver, 2.0)
     
+    # 페이지가 완전히 로드될 때까지 대기
     time.sleep(2)
     
+    # 다양한 방법으로 탭 찾기
     selectors = [
         f"//ul[@class='quarter-tab-cover']//a[contains(text(), '{tab_name}')]",
         f"//a[contains(text(), '{tab_name}')]",
@@ -297,6 +196,7 @@ def select_property_tab(driver, tab_name: str) -> bool:
             log(f"  🔍 탭 찾기 시도 {idx}/{len(selectors)}")
             elem = driver.find_element(By.XPATH, selector)
             
+            # 스크롤 및 클릭
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
             time.sleep(0.5)
             elem.click()
@@ -315,8 +215,10 @@ def select_property_tab(driver, tab_name: str) -> bool:
     
     return False
 
+
 def find_date_inputs(driver) -> Tuple[object, object]:
-    """시작일/종료일 입력 박스 찾기"""
+    """시작일/종료일 입력 박스 찾기 - 절대 수정 금지!"""
+    # 명시적 ID 우선
     try:
         start = driver.find_element(By.CSS_SELECTOR, "#srchBgnDe")
         end = driver.find_element(By.CSS_SELECTOR, "#srchEndDe")
@@ -324,6 +226,7 @@ def find_date_inputs(driver) -> Tuple[object, object]:
     except:
         pass
     
+    # name 속성
     try:
         start = driver.find_element(By.CSS_SELECTOR, "input[name='srchBgnDe']")
         end = driver.find_element(By.CSS_SELECTOR, "input[name='srchEndDe']")
@@ -331,20 +234,23 @@ def find_date_inputs(driver) -> Tuple[object, object]:
     except:
         pass
     
+    # type=date
     dates = driver.find_elements(By.CSS_SELECTOR, "input[type='date']")
     if len(dates) >= 2:
         return dates[0], dates[1]
     
     raise RuntimeError("날짜 입력 박스를 찾을 수 없습니다")
 
+
 def set_dates(driver, start_date: date, end_date: date) -> bool:
-    """날짜 입력"""
+    """날짜 입력 - 절대 수정 금지!"""
     try:
         start_el, end_el = find_date_inputs(driver)
         
         start_val = start_date.isoformat()
         end_val = end_date.isoformat()
         
+        # JavaScript로 강제 입력
         driver.execute_script("""
             arguments[0].value = arguments[1];
             arguments[0].dispatchEvent(new Event('input', {bubbles:true}));
@@ -359,6 +265,7 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
         
         time.sleep(0.5)
         
+        # 검증
         actual_start = start_el.get_attribute("value")
         actual_end = end_el.get_attribute("value")
         
@@ -373,8 +280,9 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
         log(f"  ❌ 날짜 설정 실패: {e}")
         return False
 
+
 def click_excel_download(driver) -> bool:
-    """EXCEL 다운 버튼 클릭"""
+    """EXCEL 다운 버튼 클릭 - 절대 수정 금지!"""
     try:
         btn = driver.find_element(
             By.XPATH,
@@ -385,24 +293,27 @@ def click_excel_download(driver) -> bool:
         btn.click()
         time.sleep(1.0)
         
+        # Alert 확인 (100건 제한 포함)
         try:
             try_accept_alert(driver, 3.0)
         except Exception as e:
             if "DOWNLOAD_LIMIT_100" in str(e):
-                raise
+                raise  # 100건 제한은 상위로 전달
         
         log(f"  ✅ EXCEL 다운 버튼 클릭")
         return True
     except Exception as e:
         if "DOWNLOAD_LIMIT_100" in str(e):
-            raise
+            raise  # 100건 제한은 상위로 전달
         log(f"  ❌ 다운 버튼 클릭 실패: {e}")
         return False
 
+
 def wait_for_download(timeout: int = 30, baseline_files: set = None) -> Optional[Path]:
-    """다운로드 완료 대기 - 개선된 감지 로직"""
+    """다운로드 완료 대기 - 절대 수정 금지!"""
     start_time = time.time()
     
+    # baseline이 없으면 현재 파일 목록 사용
     if baseline_files is None:
         baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
     
@@ -417,13 +328,16 @@ def wait_for_download(timeout: int = 30, baseline_files: set = None) -> Optional
         elapsed = int(time.time() - start_time)
         current_time = time.time()
         
+        # 0.3초마다 체크
         if current_time - last_check_time < 0.3:
             time.sleep(0.1)
             continue
         last_check_time = current_time
         
+        # 현재 폴더의 모든 파일
         current_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
         
+        # .crdownload 파일 확인
         crdownloads = [f for f in current_files if f.suffix == '.crdownload']
         if crdownloads:
             found_crdownload = True
@@ -432,30 +346,38 @@ def wait_for_download(timeout: int = 30, baseline_files: set = None) -> Optional
                 log(f"  ⏳ 진행중... ({elapsed}초, {sizes[0]:,} bytes)")
             continue
         
+        # 엑셀 파일 찾기 - 새 파일만
         excel_files = [
             f for f in current_files 
             if f.is_file() 
             and f.suffix.lower() in ['.xls', '.xlsx']
-            and f not in baseline_files
+            and f not in baseline_files  # 기존 파일 제외
         ]
         
         if excel_files:
+            # 가장 최근 파일 (mtime 기준)
             latest = max(excel_files, key=lambda p: p.stat().st_mtime)
             size = latest.stat().st_size
             
+            # 파일이 있고 크기가 1KB 이상이면
             if size > 1000:
+                # 크기 안정화 확인 (0.5초 대기)
                 time.sleep(0.5)
                 new_size = latest.stat().st_size
                 
+                # 크기가 안정화되면 성공
                 if new_size == size:
                     log(f"  ✅ 다운로드 완료: {latest.name} ({size:,} bytes)")
                     return latest
                 else:
+                    # 아직 쓰는 중
                     if elapsed % 2 == 0:
                         log(f"  📝 파일 쓰기 중... ({new_size:,} bytes)")
     
+    # 타임아웃
     log(f"  ⏱️  타임아웃 ({timeout}초)")
     
+    # 디버깅: 새 파일이 있는지 확인
     all_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
     new_files = [f for f in all_files if f not in baseline_files]
     
@@ -468,24 +390,24 @@ def wait_for_download(timeout: int = 30, baseline_files: set = None) -> Optional
     
     return None
 
+
 def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, month: int) -> Path:
     """다운로드 파일을 목적지로 이동 및 이름 변경"""
+    # 폴더 생성
     folder_name = sanitize_folder_name(property_type)
     dest_dir = DOWNLOAD_DIR / folder_name
     dest_dir.mkdir(parents=True, exist_ok=True)
     
+    # 파일명: 아파트 200601.xlsx
     filename = f"{property_type} {year:04d}{month:02d}.xlsx"
     dest_path = dest_dir / filename
     
+    # 이동
     downloaded_file.rename(dest_path)
     log(f"  📁 저장: {dest_path}")
     
-    # CI 환경에서만 OneDrive 업로드
-    if IS_CI:
-        remote_path = f"{folder_name}/{filename}"
-        upload_to_onedrive(dest_path, remote_path)
-    
     return dest_path
+
 
 def generate_monthly_dates(start_year: int = 2006, start_month: int = 1) -> List[Tuple[date, date]]:
     """2006년 1월부터 현재까지 월별 (시작일, 종료일) 생성"""
@@ -494,6 +416,7 @@ def generate_monthly_dates(start_year: int = 2006, start_month: int = 1) -> List
     dates = []
     
     while current <= today:
+        # 해당 월의 마지막 날
         if current.month == 12:
             next_month = date(current.year + 1, 1, 1)
         else:
@@ -501,13 +424,17 @@ def generate_monthly_dates(start_year: int = 2006, start_month: int = 1) -> List
         
         last_day = next_month - timedelta(days=1)
         
+        # 현재 달이면 오늘까지만
         if current.year == today.year and current.month == today.month:
             last_day = today
         
         dates.append((current, last_day))
+        
+        # 다음 달로
         current = next_month
     
     return dates
+
 
 def load_progress() -> dict:
     """진행 상황 로드"""
@@ -516,30 +443,30 @@ def load_progress() -> dict:
             return json.load(f)
     return {}
 
+
 def save_progress(progress: dict):
     """진행 상황 저장"""
     with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
         json.dump(progress, f, indent=2, ensure_ascii=False)
-    
-    # CI 환경에서 OneDrive 동기화
-    if IS_CI:
-        sync_progress_to_onedrive()
 
-def is_already_downloaded(property_type: str, year: int, month: int, onedrive_files: set = None) -> bool:
-    """이미 다운로드된 파일인지 확인 - 로컬과 OneDrive 모두 확인"""
+
+def is_already_downloaded(property_type: str, year: int, month: int) -> bool:
+    """이미 다운로드된 파일인지 확인 (로컬 + Google Drive)"""
     folder_name = sanitize_folder_name(property_type)
     filename = f"{property_type} {year:04d}{month:02d}.xlsx"
     
-    # 로컬 파일 확인
-    local_path = DOWNLOAD_DIR / folder_name / filename
-    if local_path.exists():
+    # 로컬 확인
+    dest_path = DOWNLOAD_DIR / folder_name / filename
+    if dest_path.exists():
         return True
     
-    # CI 환경에서 OneDrive 확인
-    if IS_CI:
-        return check_file_exists_in_onedrive(property_type, year, month, onedrive_files)
+    # Google Drive 확인
+    if folder_name in GDRIVE_EXISTING_FILES:
+        if filename in GDRIVE_EXISTING_FILES[folder_name]:
+            return True
     
     return False
+
 
 def check_if_all_historical_complete(progress: dict) -> bool:
     """모든 과거 데이터가 완료되었는지 확인 (2006-01 ~ 작년 12월)"""
@@ -550,12 +477,14 @@ def check_if_all_historical_complete(progress: dict) -> bool:
         prop_key = sanitize_folder_name(prop)
         last_month = progress.get(prop_key, {}).get("last_month", "")
         
+        # 작년 12월까지 완료되지 않았으면 False
         if not last_month or last_month < last_historical_month:
             return False
     
     return True
 
-def download_single_month_with_retry(driver, property_type: str, start_date: date, end_date: date, max_retries: int = 3, onedrive_files: set = None) -> bool:
+
+def download_single_month_with_retry(driver, property_type: str, start_date: date, end_date: date, max_retries: int = 3) -> bool:
     """단일 월 다운로드 - 재시도 포함"""
     year = start_date.year
     month = start_date.month
@@ -565,11 +494,11 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
     log(f"{'='*60}")
     
     # 이미 다운로드됨?
-    if is_already_downloaded(property_type, year, month, onedrive_files):
-        log(f"  ⏭️  이미 존재함, 스킵")
+    if is_already_downloaded(property_type, year, month):
+        log(f"  ⏭️  이미 존재함, 스킵 (로컬 또는 Google Drive)")
         return True
     
-    # temp 폴더 정리
+    # temp 폴더 정리 (이전 실패 파일 제거)
     try:
         for old_file in TEMP_DOWNLOAD_DIR.glob("*.xlsx"):
             old_file.unlink()
@@ -582,6 +511,7 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
     for attempt in range(1, max_retries + 1):
         log(f"  🔄 시도 {attempt}/{max_retries}")
         
+        # 날짜 설정
         if not set_dates(driver, start_date, end_date):
             if attempt < max_retries:
                 log(f"  ⏳ 15초 대기 후 재시도...")
@@ -589,8 +519,10 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                 continue
             return False
         
+        # 다운로드 클릭 직전 파일 목록 저장
         baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
         
+        # 다운로드 클릭
         if not click_excel_download(driver):
             if attempt < max_retries:
                 log(f"  ⏳ 15초 대기 후 재시도...")
@@ -598,9 +530,11 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                 continue
             return False
         
+        # 다운로드 대기 (30초)
         downloaded = wait_for_download(timeout=30, baseline_files=baseline_files)
         
         if downloaded:
+            # 성공! 이동 및 이름 변경
             try:
                 move_and_rename_file(downloaded, property_type, year, month)
                 return True
@@ -612,6 +546,7 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                     continue
                 return False
         else:
+            # 실패
             if attempt < max_retries:
                 log(f"  ⏳ 15초 대기 후 재시도...")
                 time.sleep(15)
@@ -620,6 +555,7 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                 return False
     
     return False
+
 
 def main():
     """메인 함수"""
@@ -639,17 +575,20 @@ def main():
         log(f"🧪 테스트 모드: 최근 {args.max_months}개월")
     log("")
     
+    # Google Drive 기존 파일 목록 로드
+    load_gdrive_existing_files()
+    log("")
+    
     # 진행 상황 로드
-    if IS_CI:
-        progress = download_progress_from_onedrive()
-    else:
-        progress = load_progress()
+    progress = load_progress()
     
     # 모드 결정
     if args.update_mode:
+        # 강제 업데이트 모드
         update_mode = True
         log("🔄 업데이트 모드: 최근 1년치만 갱신")
     else:
+        # 자동 판단
         update_mode = check_if_all_historical_complete(progress)
         if update_mode:
             log("✅ 과거 데이터 완료 확인")
@@ -661,15 +600,18 @@ def main():
     
     # 날짜 범위 생성
     if update_mode:
+        # 최근 1년 (13개월 - 여유있게)
         today = date.today()
         start_year = today.year - 1
         start_month = today.month
         monthly_dates = generate_monthly_dates(start_year, start_month)
         log(f"📅 다운로드 기간: {start_year}-{start_month:02d} ~ {today.strftime('%Y-%m')} ({len(monthly_dates)}개월)")
     else:
+        # 전체 기간
         monthly_dates = generate_monthly_dates(2006, 1)
         log(f"📅 다운로드 기간: 2006-01 ~ {date.today().strftime('%Y-%m')} ({len(monthly_dates)}개월)")
     
+    # 테스트 모드
     if args.test_mode:
         monthly_dates = monthly_dates[-args.max_months:]
         log(f"🧪 테스트 모드: 최근 {len(monthly_dates)}개월만")
@@ -679,29 +621,26 @@ def main():
     driver = build_driver()
     
     try:
+        # 페이지 로드
         log("🌐 사이트 접속 중...")
         driver.get(MOLIT_URL)
-        time.sleep(5)
+        time.sleep(5)  # 로딩 대기 증가
         try_accept_alert(driver, 2.0)
         log(f"✅ 접속 완료: {driver.current_url}\n")
         
+        # 페이지 상태 확인
         log(f"📄 페이지 제목: {driver.title}")
         log("")
         
+        # 전체 통계
         total_success = 0
         total_fail = 0
         
+        # 각 부동산 종목별로
         for prop_idx, property_type in enumerate(PROPERTY_TYPES, 1):
             log("="*70)
             log(f"📊 [{prop_idx}/{len(PROPERTY_TYPES)}] {property_type}")
             log("="*70)
-            
-            # 파일 목록 가져오기 (CI 환경에서 OneDrive 확인)
-            onedrive_files = None
-            if IS_CI:
-                onedrive_files = list_files_in_onedrive_folder(property_type)
-            elif not IS_CI:
-                onedrive_files = list_files_in_onedrive_folder(property_type)
             
             # 탭 선택
             if not select_property_tab(driver, property_type):
@@ -729,6 +668,7 @@ def main():
                 month = start_date.month
                 month_key = f"{year:04d}{month:02d}"
                 
+                # 이미 완료한 달 스킵
                 if last_completed and month_key <= last_completed:
                     skipped_count += 1
                     if skipped_count == 1:
@@ -737,18 +677,14 @@ def main():
                 
                 log(f"\n[{month_idx}/{len(monthly_dates)}]", end=" ")
                 
-                try:
-                    success = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3, onedrive_files=onedrive_files)
-                except Exception as e:
-                    if str(e) == "DOWNLOAD_LIMIT_100":
-                        raise
-                    log(f"❌ 예외 발생: {e}")
-                    success = False
+                # 다운로드 시도 (최대 3회 재시도)
+                success = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3)
                 
                 if success:
                     success_count += 1
                     consecutive_fails = 0
                     
+                    # 진행 상황 저장
                     if prop_key not in progress:
                         progress[prop_key] = {}
                     progress[prop_key]["last_month"] = month_key
@@ -759,6 +695,7 @@ def main():
                     consecutive_fails += 1
                     log(f"⚠️  실패 카운트: {fail_count} (연속: {consecutive_fails})")
                     
+                    # 연속 3회 실패 시 중단 (100회 제한 가능성)
                     if consecutive_fails >= 3:
                         log(f"\n⛔ 연속 {consecutive_fails}회 실패 - 다운로드 제한 가능성")
                         log(f"💾 진행 상황 저장됨: {PROGRESS_FILE}")
@@ -767,6 +704,7 @@ def main():
                         driver.quit()
                         return
                 
+                # 다음 요청 전 대기
                 time.sleep(2)
             
             log(f"\n✅ {property_type} 완료")
@@ -774,6 +712,7 @@ def main():
             total_success += success_count
             total_fail += fail_count
             
+            # 테스트 모드: 첫 종목만
             if args.test_mode:
                 log("\n🧪 테스트 모드 - 첫 종목만 완료")
                 break
@@ -807,6 +746,7 @@ def main():
             log("✅ 드라이버 종료")
         except:
             pass
+
 
 if __name__ == "__main__":
     main()
