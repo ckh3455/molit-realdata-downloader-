@@ -5,7 +5,7 @@
 - 진행 상황 저장 및 재개
 - 100회 제한 대응 (다음날 자동 재개)
 - 업데이트 모드 (최근 1년만 갱신)
-- Google Drive 기존 파일 체크
+- Google Drive 기존 파일 체크 및 최신 파일 이후부터 다운로드
 
 파일명: download_realdata.py
 """
@@ -67,15 +67,25 @@ TEMP_DOWNLOAD_DIR.mkdir(exist_ok=True)
 # Google Drive 기존 파일 캐시
 GDRIVE_EXISTING_FILES: Dict[str, Set[str]] = {}
 
-
 def log(msg: str, end="\n"):
     """로그 출력"""
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{timestamp}] {msg}", end=end, flush=True)
 
+def parse_filename(filename: str) -> Optional[Tuple[str, int, int]]:
+    """파일명에서 종목, 년도, 월 추출
+    예: "아파트 202411.xlsx" -> ("아파트", 2024, 11)
+    """
+    match = re.match(r'^(.+?)\s+(\d{4})(\d{2})\.xlsx$', filename)
+    if match:
+        property_type = match.group(1)
+        year = int(match.group(2))
+        month = int(match.group(3))
+        return (property_type, year, month)
+    return None
 
 def load_gdrive_existing_files():
-    """Google Drive 기존 파일 목록 로드"""
+    """Google Drive 기존 파일 목록 로드 및 디버깅"""
     global GDRIVE_EXISTING_FILES
     
     if EXISTING_FILES_JSON.exists():
@@ -86,19 +96,68 @@ def load_gdrive_existing_files():
             
             total = sum(len(files) for files in GDRIVE_EXISTING_FILES.values())
             log(f"✅ Google Drive 기존 파일 로드: {total}개")
+            
+            # 디버깅: 각 폴더별 파일 개수 출력
+            for folder_name, files in GDRIVE_EXISTING_FILES.items():
+                if files:
+                    log(f"   📁 {folder_name}: {len(files)}개 파일")
+                    # 파일명에서 날짜 추출하여 최신 파일 찾기
+                    parsed_files = []
+                    for fname in files:
+                        parsed = parse_filename(fname)
+                        if parsed:
+                            parsed_files.append((parsed, fname))
+                    
+                    if parsed_files:
+                        parsed_files.sort(key=lambda x: (x[0][1], x[0][2]))
+                        log(f"      최초: {parsed_files[0][1]} ({parsed_files[0][0][1]}-{parsed_files[0][0][2]:02d})")
+                        log(f"      최신: {parsed_files[-1][1]} ({parsed_files[-1][0][1]}-{parsed_files[-1][0][2]:02d})")
+                else:
+                    log(f"   📁 {folder_name}: (파일 없음)")
+            
             return True
         except Exception as e:
             log(f"⚠️  기존 파일 목록 로드 실패: {e}")
+            import traceback
+            traceback.print_exc()
     else:
         log("⚠️  existing_files.json 없음 - 모든 파일 다운로드")
     
     return False
 
+def get_latest_month_from_gdrive(property_type: str) -> Optional[str]:
+    """Google Drive에서 해당 종목의 최신 파일 월 찾기
+    Returns: "YYYYMM" 형식 또는 None
+    """
+    folder_name = sanitize_folder_name(property_type)
+    
+    if folder_name not in GDRIVE_EXISTING_FILES:
+        return None
+    
+    files = GDRIVE_EXISTING_FILES[folder_name]
+    if not files:
+        return None
+    
+    # 파일명에서 날짜 추출
+    parsed_files = []
+    for fname in files:
+        parsed = parse_filename(fname)
+        if parsed:
+            parsed_files.append((parsed, fname))
+    
+    if not parsed_files:
+        return None
+    
+    # 년도, 월로 정렬하여 최신 파일 찾기
+    parsed_files.sort(key=lambda x: (x[0][1], x[0][2]))
+    latest = parsed_files[-1]
+    year, month = latest[0][1], latest[0][2]
+    
+    return f"{year:04d}{month:02d}"
 
 def sanitize_folder_name(name: str) -> str:
     """폴더명에서 특수문자 제거"""
     return re.sub(r'[<>:"/\\|?*]', '_', name)
-
 
 def build_driver():
     """크롬 드라이버 생성 - 절대 수정 금지!"""
@@ -142,7 +201,6 @@ def build_driver():
     driver = webdriver.Chrome(service=service, options=opts)
     return driver
 
-
 def try_accept_alert(driver, timeout=3.0) -> bool:
     """Alert 자동 수락 - 100건 제한 감지"""
     end_time = time.time() + timeout
@@ -168,7 +226,6 @@ def try_accept_alert(driver, timeout=3.0) -> bool:
                 raise  # 100건 제한은 상위로 전달
             time.sleep(0.2)
     return False
-
 
 def select_property_tab(driver, tab_name: str) -> bool:
     """부동산 종목 탭 선택 - 절대 수정 금지!"""
@@ -215,7 +272,6 @@ def select_property_tab(driver, tab_name: str) -> bool:
     
     return False
 
-
 def find_date_inputs(driver) -> Tuple[object, object]:
     """시작일/종료일 입력 박스 찾기 - 절대 수정 금지!"""
     # 명시적 ID 우선
@@ -240,7 +296,6 @@ def find_date_inputs(driver) -> Tuple[object, object]:
         return dates[0], dates[1]
     
     raise RuntimeError("날짜 입력 박스를 찾을 수 없습니다")
-
 
 def set_dates(driver, start_date: date, end_date: date) -> bool:
     """날짜 입력 - 절대 수정 금지!"""
@@ -280,7 +335,6 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
         log(f"  ❌ 날짜 설정 실패: {e}")
         return False
 
-
 def click_excel_download(driver) -> bool:
     """EXCEL 다운 버튼 클릭 - 절대 수정 금지!"""
     try:
@@ -307,7 +361,6 @@ def click_excel_download(driver) -> bool:
             raise  # 100건 제한은 상위로 전달
         log(f"  ❌ 다운 버튼 클릭 실패: {e}")
         return False
-
 
 def wait_for_download(timeout: int = 30, baseline_files: set = None) -> Optional[Path]:
     """다운로드 완료 대기 - 절대 수정 금지!"""
@@ -390,7 +443,6 @@ def wait_for_download(timeout: int = 30, baseline_files: set = None) -> Optional
     
     return None
 
-
 def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, month: int) -> Path:
     """다운로드 파일을 목적지로 이동 및 이름 변경"""
     # 폴더 생성
@@ -407,7 +459,6 @@ def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, m
     log(f"  📁 저장: {dest_path}")
     
     return dest_path
-
 
 def generate_monthly_dates(start_year: int = 2006, start_month: int = 1) -> List[Tuple[date, date]]:
     """2006년 1월부터 현재까지 월별 (시작일, 종료일) 생성"""
@@ -435,7 +486,6 @@ def generate_monthly_dates(start_year: int = 2006, start_month: int = 1) -> List
     
     return dates
 
-
 def load_progress() -> dict:
     """진행 상황 로드"""
     if PROGRESS_FILE.exists():
@@ -443,12 +493,10 @@ def load_progress() -> dict:
             return json.load(f)
     return {}
 
-
 def save_progress(progress: dict):
     """진행 상황 저장"""
     with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
         json.dump(progress, f, indent=2, ensure_ascii=False)
-
 
 def is_already_downloaded(property_type: str, year: int, month: int) -> bool:
     """이미 다운로드된 파일인지 확인 (로컬 + Google Drive)"""
@@ -458,15 +506,16 @@ def is_already_downloaded(property_type: str, year: int, month: int) -> bool:
     # 로컬 확인
     dest_path = DOWNLOAD_DIR / folder_name / filename
     if dest_path.exists():
+        log(f"  📍 로컬 파일 존재: {filename}")
         return True
     
     # Google Drive 확인
     if folder_name in GDRIVE_EXISTING_FILES:
         if filename in GDRIVE_EXISTING_FILES[folder_name]:
+            log(f"  ☁️  Google Drive 파일 존재: {filename}")
             return True
     
     return False
-
 
 def check_if_all_historical_complete(progress: dict) -> bool:
     """모든 과거 데이터가 완료되었는지 확인 (2006-01 ~ 작년 12월)"""
@@ -482,7 +531,6 @@ def check_if_all_historical_complete(progress: dict) -> bool:
             return False
     
     return True
-
 
 def download_single_month_with_retry(driver, property_type: str, start_date: date, end_date: date, max_retries: int = 3) -> bool:
     """단일 월 다운로드 - 재시도 포함"""
@@ -555,7 +603,6 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                 return False
     
     return False
-
 
 def main():
     """메인 함수"""
@@ -651,9 +698,27 @@ def main():
             prop_key = sanitize_folder_name(property_type)
             last_completed = progress.get(prop_key, {}).get("last_month", "")
             
+            # Google Drive에서 최신 파일 확인
+            gdrive_latest = get_latest_month_from_gdrive(property_type)
+            
+            if gdrive_latest:
+                log(f"☁️  Google Drive 최신 파일: {gdrive_latest}")
+            
             if last_completed:
-                log(f"📌 마지막 완료: {last_completed}")
-                log(f"🔄 이어서 진행합니다...")
+                log(f"📌 진행 상황 파일의 마지막 완료: {last_completed}")
+            
+            # Google Drive와 진행 상황 파일 중 더 최신 것을 사용
+            if gdrive_latest and last_completed:
+                if gdrive_latest > last_completed:
+                    log(f"🔄 Google Drive가 더 최신입니다. {gdrive_latest}부터 시작")
+                    last_completed = gdrive_latest
+                else:
+                    log(f"📌 진행 상황 파일이 더 최신입니다. {last_completed}부터 시작")
+            elif gdrive_latest:
+                log(f"🔄 Google Drive 최신 파일 기준: {gdrive_latest}부터 시작")
+                last_completed = gdrive_latest
+            elif last_completed:
+                log(f"📌 진행 상황 파일 기준: {last_completed}부터 시작")
             else:
                 log(f"🆕 처음 시작합니다")
             
