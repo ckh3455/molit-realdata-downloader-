@@ -6,7 +6,7 @@
 - 진행 상황 저장 및 재개
 - 100회 제한 대응 (다음날 자동 재개)
 - 업데이트 모드 (최근 1년만 갱신)
-- Microsoft Graph API를 사용한 OneDrive 업로드 지원
+- 로컬 OneDrive 폴더 직접 사용 또는 Microsoft Graph API 사용
 파일명: download_realdata.py
 """
 
@@ -28,46 +28,28 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.alert import Alert
 from selenium.common.exceptions import UnexpectedAlertPresentException
 
-# OneDrive 클라이언트 import
+# config.py에서 설정 가져오기
+import config
+
+# OneDrive 클라이언트 import (CI 환경에서만 필요)
 try:
     from onedrive_client import OneDriveClient
 except ImportError:
     OneDriveClient = None
 
-# ==================== 설정 ====================
+# ==================== 설정 (config.py에서 가져옴) ====================
 
-IS_CI = os.getenv("CI", "") == "1"
+IS_CI = config.IS_CI
+DOWNLOAD_DIR = config.DOWNLOAD_DIR
+TEMP_DOWNLOAD_DIR = config.TEMP_DOWNLOAD_DIR
+MOLIT_URL = config.MOLIT_URL
+PROPERTY_TYPES = config.PROPERTY_TYPES
 
-# 저장 폴더 (환경에 따라 자동 전환)
-if IS_CI:
-    # GitHub Actions: 로컬 저장 후 OneDrive 업로드
-    DOWNLOAD_DIR = Path("_downloads")
-    ONEDRIVE_BASE_FOLDER = os.getenv("ONEDRIVE_BASE_FOLDER", "office work/부동산 실거래 데이터")
-else:
-    # 로컬 PC: OneDrive 경로
-    DOWNLOAD_DIR = Path(r"D:\OneDrive\office work\부동산 실거래 데이터")
-    ONEDRIVE_BASE_FOLDER = None
+# CI 환경에서만 OneDrive 관련 설정
+ONEDRIVE_BASE_FOLDER = os.getenv("ONEDRIVE_BASE_FOLDER", "office work/부동산 실거래 데이터") if IS_CI else None
 
 # OneDrive 클라이언트 전역 변수
 onedrive_client: Optional[OneDriveClient] = None
-
-# 임시 다운로드 폴더
-TEMP_DOWNLOAD_DIR = Path("_temp_downloads")
-
-# 국토부 URL (엑셀 다운로드 페이지)
-MOLIT_URL = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
-
-# 부동산 종목 (8개)
-PROPERTY_TYPES = [
-    "아파트",
-    "연립다세대",
-    "단독다가구",
-    "오피스텔",
-    "토지",
-    "상업업무용",
-    "분양권",
-    "입주권"
-]
 
 # 진행 상황 파일
 PROGRESS_FILE = Path("download_progress.json")
@@ -86,7 +68,7 @@ def sanitize_folder_name(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '_', name)
 
 def init_onedrive_client() -> bool:
-    """OneDrive 클라이언트 초기화"""
+    """OneDrive 클라이언트 초기화 (CI 환경에서만)"""
     global onedrive_client
     
     if not IS_CI or not ONEDRIVE_BASE_FOLDER:
@@ -122,9 +104,9 @@ def init_onedrive_client() -> bool:
         return False
 
 def upload_to_onedrive(local_path: Path, remote_path: str) -> bool:
-    """Microsoft Graph API를 사용하여 OneDrive에 업로드"""
+    """Microsoft Graph API를 사용하여 OneDrive에 업로드 (CI 환경에서만)"""
     if not IS_CI or not onedrive_client:
-        return True  # 로컬에서는 불필요
+        return True  # 로컬에서는 불필요 (이미 로컬 OneDrive 폴더에 저장됨)
     
     try:
         log(f"  ☁️  OneDrive 업로드 시작: {remote_path}")
@@ -149,9 +131,9 @@ def upload_to_onedrive(local_path: Path, remote_path: str) -> bool:
         return False
 
 def sync_progress_to_onedrive() -> bool:
-    """진행 상황 파일을 OneDrive에 동기화"""
+    """진행 상황 파일을 OneDrive에 동기화 (CI 환경에서만)"""
     if not IS_CI or not onedrive_client:
-        return True  # 로컬에서는 불필요
+        return True  # 로컬에서는 불필요 (이미 로컬 OneDrive 폴더에 저장됨)
     
     try:
         log("  ☁️  진행 상황 파일 동기화 중...")
@@ -169,7 +151,7 @@ def sync_progress_to_onedrive() -> bool:
         return False
 
 def download_progress_from_onedrive() -> dict:
-    """OneDrive에서 진행 상황 파일 다운로드"""
+    """OneDrive에서 진행 상황 파일 다운로드 (CI 환경에서만)"""
     if not IS_CI or not onedrive_client:
         return {}
     
@@ -190,8 +172,15 @@ def download_progress_from_onedrive() -> dict:
     return load_progress()
 
 def list_files_in_onedrive_folder(property_type: str) -> set:
-    """OneDrive 폴더의 파일 목록 가져오기"""
+    """OneDrive 폴더의 파일 목록 가져오기 (CI 환경에서만)"""
     if not IS_CI or not onedrive_client:
+        # 로컬 환경에서는 로컬 파일 시스템에서 확인
+        folder_name = sanitize_folder_name(property_type)
+        folder_path = DOWNLOAD_DIR / folder_name
+        if folder_path.exists():
+            files = {f.name for f in folder_path.iterdir() if f.is_file()}
+            log(f"  📁 로컬에서 {len(files)}개 파일 발견: {property_type}")
+            return files
         return set()
     
     try:
@@ -216,7 +205,15 @@ def list_files_in_onedrive_folder(property_type: str) -> set:
 
 def check_file_exists_in_onedrive(property_type: str, year: int, month: int, onedrive_files: set = None) -> bool:
     """OneDrive에서 파일 존재 여부 확인"""
-    if not IS_CI or not onedrive_client:
+    if not IS_CI:
+        # 로컬 환경에서는 로컬 파일 시스템에서 확인
+        folder_name = sanitize_folder_name(property_type)
+        filename = f"{property_type} {year:04d}{month:02d}.xlsx"
+        local_path = DOWNLOAD_DIR / folder_name / filename
+        return local_path.exists()
+    
+    # CI 환경에서 OneDrive 확인
+    if not onedrive_client:
         return False
     
     # 파일명 생성
@@ -608,7 +605,7 @@ def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, m
     downloaded_file.rename(dest_path)
     log(f"  📁 저장: {dest_path}")
     
-    # CI 환경에서 OneDrive 업로드
+    # CI 환경에서만 OneDrive 업로드 (로컬에서는 이미 OneDrive 폴더에 저장됨)
     if IS_CI:
         remote_path = f"{folder_name}/{filename}"
         upload_to_onedrive(dest_path, remote_path)
@@ -649,7 +646,7 @@ def save_progress(progress: dict):
     with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
         json.dump(progress, f, indent=2, ensure_ascii=False)
     
-    # CI 환경에서 OneDrive 동기화
+    # CI 환경에서만 OneDrive 동기화 (로컬에서는 이미 로컬 OneDrive 폴더에 저장됨)
     if IS_CI:
         sync_progress_to_onedrive()
 
@@ -658,7 +655,7 @@ def is_already_downloaded(property_type: str, year: int, month: int, onedrive_fi
     folder_name = sanitize_folder_name(property_type)
     filename = f"{property_type} {year:04d}{month:02d}.xlsx"
     
-    # 로컬 파일 확인
+    # 로컬 파일 확인 (항상 먼저 확인)
     local_path = DOWNLOAD_DIR / folder_name / filename
     if local_path.exists():
         return True
@@ -777,19 +774,17 @@ def main():
     log("🚀 국토부 실거래가 데이터 다운로드")
     log("="*70)
     log(f"🖥️  실행 환경: {'GitHub Actions (CI)' if IS_CI else '로컬 PC'}")
-    if IS_CI:
-        log(f"☁️  OneDrive 기본 폴더: {ONEDRIVE_BASE_FOLDER}")
     log(f"📂 저장 경로: {DOWNLOAD_DIR}")
     log(f"📊 종목 수: {len(PROPERTY_TYPES)}")
     if args.test_mode:
         log(f"🧪 테스트 모드: 최근 {args.max_months}개월")
     log("")
     
-    # OneDrive 클라이언트 초기화
+    # OneDrive 클라이언트 초기화 (CI 환경에서만)
     if IS_CI:
         init_onedrive_client()
     
-    # CI 환경에서 진행 상황 다운로드
+    # 진행 상황 로드
     if IS_CI:
         progress = download_progress_from_onedrive()
     else:
@@ -846,9 +841,12 @@ def main():
             log(f"📊 [{prop_idx}/{len(PROPERTY_TYPES)}] {property_type}")
             log("="*70)
             
-            # CI 환경에서 OneDrive 파일 목록 가져오기
+            # 파일 목록 가져오기 (로컬 또는 OneDrive)
             onedrive_files = None
             if IS_CI and onedrive_client:
+                onedrive_files = list_files_in_onedrive_folder(property_type)
+            elif not IS_CI:
+                # 로컬 환경에서는 로컬 파일 시스템에서 확인
                 onedrive_files = list_files_in_onedrive_folder(property_type)
             
             # 탭 선택
