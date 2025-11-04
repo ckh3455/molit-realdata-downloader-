@@ -54,23 +54,55 @@ jobs:
     - name: Configure rclone
       run: |
         mkdir -p ~/.config/rclone
+        
+        # RCLONE_CONFIG 시크릿 확인
+        if [ -z "$RCLONE_CONFIG" ]; then
+          echo "❌ Error: RCLONE_CONFIG secret is empty or not set"
+          exit 1
+        fi
+        
+        echo "🔧 [DEBUG] RCLONE_CONFIG 길이: ${#RCLONE_CONFIG} 문자"
+        echo "🔧 [DEBUG] RCLONE_CONFIG 첫 100자: ${RCLONE_CONFIG:0:100}"
+        
+        # 설정 파일 작성
         echo "$RCLONE_CONFIG" > ~/.config/rclone/rclone.conf
+        
         # 설정 파일 확인
         if [ ! -f ~/.config/rclone/rclone.conf ]; then
-          echo "Error: rclone.conf file was not created"
+          echo "❌ Error: rclone.conf file was not created"
           exit 1
         fi
+        
         if [ ! -s ~/.config/rclone/rclone.conf ]; then
-          echo "Error: rclone.conf file is empty"
+          echo "❌ Error: rclone.conf file is empty"
           exit 1
         fi
-        echo "rclone configuration file created successfully"
+        
+        echo "✅ rclone.conf 파일 생성 완료"
+        echo "🔧 [DEBUG] 파일 크기: $(wc -c < ~/.config/rclone/rclone.conf) bytes"
+        echo "🔧 [DEBUG] 파일 첫 200자:"
+        head -c 200 ~/.config/rclone/rclone.conf
+        
       env:
         RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
     
     - name: Verify rclone configuration
       run: |
-        rclone listremotes || echo "Warning: Could not list remotes"
+        echo "🔧 [DEBUG] rclone 설정 파일 위치: ~/.config/rclone/rclone.conf"
+        echo "🔧 [DEBUG] 설정 파일 존재 여부:"
+        ls -la ~/.config/rclone/rclone.conf || echo "❌ 파일 없음"
+        
+        echo ""
+        echo "🔧 [DEBUG] rclone listremotes 실행:"
+        rclone listremotes || echo "❌ listremotes 실패"
+        
+        echo ""
+        echo "🔧 [DEBUG] rclone config show onedrive 실행:"
+        rclone config show onedrive || echo "❌ config show 실패"
+        
+        echo ""
+        echo "🔧 [DEBUG] onedrive 원격 테스트:"
+        rclone lsd onedrive: || echo "❌ lsd 실패"
     
     - name: Install Python dependencies
       run: |
