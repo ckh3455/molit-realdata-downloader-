@@ -19,6 +19,7 @@ Google Drive 관리 스크립트
 import os
 import sys
 import json
+import re
 from pathlib import Path
 from typing import Set, Dict
 from google.oauth2 import service_account
@@ -43,6 +44,19 @@ def get_drive_service(service_account_path: str):
     return build('drive', 'v3', credentials=creds)
 
 
+def parse_filename(filename: str) -> tuple:
+    """파일명에서 종목, 년도, 월 추출
+    예: "아파트 202411.xlsx" -> ("아파트", 2024, 11)
+    """
+    match = re.match(r'^(.+?)\s+(\d{4})(\d{2})\.xlsx$', filename)
+    if match:
+        property_type = match.group(1)
+        year = int(match.group(2))
+        month = int(match.group(3))
+        return (property_type, year, month)
+    return None
+
+
 def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
     """
     Google Drive의 기존 파일 목록 조회 (페이지네이션 지원)
@@ -51,6 +65,7 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
         {폴더명: {파일명1, 파일명2, ...}}
     """
     log("🔍 Google Drive 기존 파일 확인 중...")
+    log(f"   📂 폴더 ID: {folder_id}")
     
     existing = {}
     
@@ -74,26 +89,37 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
             break
     
     log(f"   📂 {len(folders)}개 폴더 발견")
+    for f in folders:
+        log(f"      - {f['name']} (ID: {f['id']})")
+    log("")
     
     for folder in folders:
         folder_name = folder['name']
         folder_id_sub = folder['id']
         
+        log(f"   📁 '{folder_name}' 폴더 스캔 중...")
+        
         # 각 폴더의 파일 목록 (페이지네이션 처리)
         query = f"'{folder_id_sub}' in parents and trashed=false"
         files = []
         page_token = None
+        page_num = 0
         
         while True:
+            page_num += 1
             results = service.files().list(
                 q=query,
                 spaces='drive',
-                fields='nextPageToken, files(name)',
+                fields='nextPageToken, files(id, name, size, modifiedTime)',
                 pageSize=1000,
-                pageToken=page_token
+                pageToken=page_token,
+                orderBy='name'
             ).execute()
             
-            files.extend(results.get('files', []))
+            page_files = results.get('files', [])
+            files.extend(page_files)
+            log(f"      페이지 {page_num}: {len(page_files)}개 파일")
+            
             page_token = results.get('nextPageToken')
             if not page_token:
                 break
@@ -102,9 +128,22 @@ def get_existing_files(service, folder_id: str) -> Dict[str, Set[str]]:
         existing[folder_name] = file_names
         
         if file_names:
-            log(f"      {folder_name}: {len(file_names)}개 파일")
+            log(f"   ✅ {folder_name}: 총 {len(file_names)}개 파일")
+            # 파일명에서 날짜 추출하여 정렬
+            parsed_files = []
+            for fname in sorted(file_names):
+                parsed = parse_filename(fname)
+                if parsed:
+                    parsed_files.append((parsed, fname))
+            
+            if parsed_files:
+                # 년도, 월로 정렬
+                parsed_files.sort(key=lambda x: (x[0][1], x[0][2]))
+                log(f"      최신 파일: {parsed_files[-1][1]}")
+                log(f"      최초 파일: {parsed_files[0][1]}")
         else:
-            log(f"      {folder_name}: (파일 없음)")
+            log(f"   ⚠️  {folder_name}: (파일 없음)")
+        log("")
     
     log("✅ 기존 파일 확인 완료\n")
     return existing
@@ -118,24 +157,37 @@ def check_existing_files(service_account_path: str, folder_id: str):
     # JSON 저장
     output_file = Path('existing_files.json')
     with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump({k: list(v) for k, v in existing.items()}, f, indent=2, ensure_ascii=False)
+        json.dump({k: sorted(list(v)) for k, v in existing.items()}, f, indent=2, ensure_ascii=False)
     
     log(f"💾 기존 파일 목록 저장: {output_file}")
     
     # 통계
     total_files = sum(len(files) for files in existing.values())
     log(f"📊 전체 {total_files}개 파일")
+    log("")
     
     # 각 폴더별 상세 정보
+    log("=" * 60)
+    log("📋 폴더별 파일 목록 요약")
+    log("=" * 60)
     for folder_name, files in existing.items():
         if files:
-            log(f"   {folder_name}: {len(files)}개")
-            # 처음 5개 파일명 출력
-            sample_files = sorted(list(files))[:5]
-            for fname in sample_files:
-                log(f"      - {fname}")
-            if len(files) > 5:
-                log(f"      ... 외 {len(files) - 5}개")
+            log(f"\n📁 {folder_name}: {len(files)}개")
+            # 파일명에서 날짜 추출하여 정렬
+            parsed_files = []
+            for fname in sorted(files):
+                parsed = parse_filename(fname)
+                if parsed:
+                    parsed_files.append((parsed, fname))
+            
+            if parsed_files:
+                parsed_files.sort(key=lambda x: (x[0][1], x[0][2]))
+                log(f"   최초: {parsed_files[0][1]} ({parsed_files[0][0][1]}-{parsed_files[0][0][2]:02d})")
+                log(f"   최신: {parsed_files[-1][1]} ({parsed_files[-1][0][1]}-{parsed_files[-1][0][2]:02d})")
+                log(f"   범위: {parsed_files[0][0][1]}{parsed_files[0][0][2]:02d} ~ {parsed_files[-1][0][1]}{parsed_files[-1][0][2]:02d}")
+        else:
+            log(f"\n📁 {folder_name}: (파일 없음)")
+    log("")
     
     return existing
 
@@ -185,7 +237,7 @@ def upload_to_drive(service_account_path: str, folder_id: str, local_dir: Path):
         
         if items:
             drive_folder_id = items[0]['id']
-            log(f"   📂 기존 폴더 사용")
+            log(f"   📂 기존 폴더 사용 (ID: {drive_folder_id})")
         else:
             # 폴더 생성
             folder_metadata = {
@@ -198,13 +250,15 @@ def upload_to_drive(service_account_path: str, folder_id: str, local_dir: Path):
                 fields='id'
             ).execute()
             drive_folder_id = folder_file.get('id')
-            log(f"   📂 새 폴더 생성")
+            log(f"   📂 새 폴더 생성 (ID: {drive_folder_id})")
         
         # 기존 파일 목록
         existing_in_folder = existing_files.get(folder_name, set())
+        log(f"   📋 기존 파일: {len(existing_in_folder)}개")
         
         # 폴더 안의 파일들 업로드
         excel_files = sorted(folder_path.glob('*.xlsx'))
+        log(f"   📦 업로드 대상: {len(excel_files)}개")
         
         for file_path in excel_files:
             file_name = file_path.name
