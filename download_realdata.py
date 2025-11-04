@@ -32,6 +32,8 @@ import argparse
 
 import subprocess
 
+import stat
+
 from pathlib import Path
 
 from datetime import date, datetime, timedelta
@@ -472,7 +474,7 @@ def build_driver():
 
             
 
-            # 디렉토리 내 모든 파일 확인
+            found = False
 
             for candidate in candidates:
 
@@ -488,51 +490,83 @@ def build_driver():
 
                             log(f"  ✅ ChromeDriver 실행 파일 발견: {driver_path}")
 
+                            found = True
+
                             break
 
                     except:
 
                         pass
 
-            else:
+            
 
-                # 후보가 없으면 디렉토리 내 모든 파일 검색 (NOTICES 제외)
+            if not found:
+
+                # 디렉토리 내 모든 파일 검색
 
                 all_files = list(driver_path_obj.iterdir())
 
                 executable_files = []
 
+                
+
                 for f in all_files:
 
-                    if f.is_file():
+                    if not f.is_file():
 
-                        # NOTICES, .txt, .sh 파일 제외
+                        continue
 
-                        if ('NOTICES' not in f.name.upper() and 
+                    
 
-                            not f.name.endswith('.txt') and 
+                    # NOTICES 파일 완전히 제외 (대소문자 구분 없이)
 
-                            not f.name.endswith('.sh') and
+                    if 'NOTICES' in f.name.upper():
 
-                            f.suffix != '.md'):
+                        continue
 
-                            # chromedriver가 이름에 포함된 파일 우선
+                    
 
-                            if 'chromedriver' in f.name.lower():
+                    # 텍스트 파일, 스크립트 파일 제외
 
-                                executable_files.insert(0, f)
+                    if f.suffix in ['.txt', '.sh', '.md', '.pdf', '.json']:
 
-                            else:
+                        continue
 
-                                executable_files.append(f)
+                    
+
+                    # 파일명이 정확히 "chromedriver"인 경우 우선
+
+                    if f.name == "chromedriver" or f.name == "chromedriver.exe":
+
+                        executable_files.insert(0, f)
+
+                        continue
+
+                    
+
+                    # chromedriver로 시작하되 NOTICES가 없는 경우
+
+                    if f.name.lower().startswith("chromedriver"):
+
+                        executable_files.append(f)
+
+                        continue
 
                 
 
                 if executable_files:
 
-                    driver_path = str(executable_files[0].absolute())
+                    # 첫 번째 파일 선택 (우선순위: chromedriver > chromedriver로 시작하는 파일)
+
+                    selected = executable_files[0]
+
+                    driver_path = str(selected.absolute())
 
                     log(f"  ✅ ChromeDriver 파일 발견: {driver_path}")
+
+                    log(f"  📝 파일명: {selected.name}")
+
+                    found = True
 
                 else:
 
@@ -545,6 +579,8 @@ def build_driver():
                         driver_path = str(parent_chromedriver.absolute())
 
                         log(f"  ✅ 상위 디렉토리에서 ChromeDriver 발견: {driver_path}")
+
+                        found = True
 
                     else:
 
