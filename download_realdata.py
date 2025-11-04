@@ -31,3 +31,9 @@
         
 
         service = Service(driver_path)
+
+        log(f"  🔧 [DEBUG] Service 객체 생성 완료")
+
+        log(f"  📦 ChromeDriver 경로: {driver_path}")
+
+        log(f"  📦 파일명: {Path(driver_path).name}")
