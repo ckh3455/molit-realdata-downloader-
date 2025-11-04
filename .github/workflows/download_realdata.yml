@@ -5,15 +5,6 @@ on:
     # 매일 오전 2시 (KST 기준) 실행
     - cron: '0 17 * * *'  # UTC 17:00 = KST 02:00
   workflow_dispatch:  # 수동 실행 가능
-    inputs:
-      mode:
-        description: 'Download mode'
-        required: false
-        default: 'update'
-        type: choice
-        options:
-          - update
-          - full
 
 jobs:
   download:
@@ -37,72 +28,14 @@ jobs:
           gnupg \
           software-properties-common \
           apt-transport-https \
-          ca-certificates \
-          curl
+          ca-certificates
     
     - name: Install Chrome
       run: |
-        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
-        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list > /dev/null
+        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+        sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
         sudo apt-get update
         sudo apt-get install -y google-chrome-stable
-    
-    - name: Install rclone
-      run: |
-        curl https://rclone.org/install.sh | sudo bash
-    
-    - name: Configure rclone
-      run: |
-        mkdir -p ~/.config/rclone
-        
-        # RCLONE_CONFIG 시크릿 확인
-        if [ -z "$RCLONE_CONFIG" ]; then
-          echo "❌ Error: RCLONE_CONFIG secret is empty or not set"
-          exit 1
-        fi
-        
-        echo "🔧 [DEBUG] RCLONE_CONFIG 길이: ${#RCLONE_CONFIG} 문자"
-        echo "🔧 [DEBUG] RCLONE_CONFIG 첫 100자: ${RCLONE_CONFIG:0:100}"
-        
-        # 설정 파일 작성
-        echo "$RCLONE_CONFIG" > ~/.config/rclone/rclone.conf
-        
-        # 설정 파일 확인
-        if [ ! -f ~/.config/rclone/rclone.conf ]; then
-          echo "❌ Error: rclone.conf file was not created"
-          exit 1
-        fi
-        
-        if [ ! -s ~/.config/rclone/rclone.conf ]; then
-          echo "❌ Error: rclone.conf file is empty"
-          exit 1
-        fi
-        
-        echo "✅ rclone.conf 파일 생성 완료"
-        echo "🔧 [DEBUG] 파일 크기: $(wc -c < ~/.config/rclone/rclone.conf) bytes"
-        echo "🔧 [DEBUG] 파일 첫 200자:"
-        head -c 200 ~/.config/rclone/rclone.conf
-        
-      env:
-        RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
-    
-    - name: Verify rclone configuration
-      run: |
-        echo "🔧 [DEBUG] rclone 설정 파일 위치: ~/.config/rclone/rclone.conf"
-        echo "🔧 [DEBUG] 설정 파일 존재 여부:"
-        ls -la ~/.config/rclone/rclone.conf || echo "❌ 파일 없음"
-        
-        echo ""
-        echo "🔧 [DEBUG] rclone listremotes 실행:"
-        rclone listremotes || echo "❌ listremotes 실패"
-        
-        echo ""
-        echo "🔧 [DEBUG] rclone config show onedrive 실행:"
-        rclone config show onedrive || echo "❌ config show 실패"
-        
-        echo ""
-        echo "🔧 [DEBUG] onedrive 원격 테스트:"
-        rclone lsd onedrive: || echo "❌ lsd 실패"
     
     - name: Install Python dependencies
       run: |
@@ -112,32 +45,9 @@ jobs:
     - name: Run download script
       env:
         CI: "1"
-        ONEDRIVE_REMOTE: "onedrive:office work/부동산 실거래 데이터"
+        ONEDRIVE_BASE_FOLDER: "office work/부동산 실거래 데이터"
+        AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       run: |
-        mode="${{ github.event.inputs.mode }}"
-        if [ "$mode" = "update" ] || [ -z "$mode" ]; then
-          python download_realdata.py --update-mode
-        else
-          python download_realdata.py
-        fi
-      continue-on-error: true
-    
-    - name: Upload progress file to OneDrive
-      if: always()
-      run: |
-        if [ -f download_progress.json ]; then
-          rclone copy download_progress.json "onedrive:office work/부동산 실거래 데이터/" --no-check-dest || echo "Failed to upload progress file"
-        else
-          echo "download_progress.json not found"
-        fi
-    
-    - name: Upload logs as artifact
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: download-results
-        path: |
-          download_progress.json
-          _downloads/
-        if-no-files-found: ignore
-        retention-days: 7
+        python download_realdata.py --update-mode
