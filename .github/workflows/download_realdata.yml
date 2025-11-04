@@ -102,7 +102,7 @@ jobs:
         SERVICE_ACCOUNT_JSON: service-account.json
         GDRIVE_FOLDER_ID: "1x3lHLwrixnqVFpUoxkEzqgmcn19Jhw19"
       run: |
-        python upload_to_gdrive.py --check-existing
+        python upload_to_gdrive.py --check-existing || echo "⚠️ 기존 파일 확인 실패 (처음 실행일 수 있음)"
     
     - name: Run download script
       env:
@@ -112,7 +112,7 @@ jobs:
         SERVICE_ACCOUNT_JSON: service-account.json
         GDRIVE_FOLDER_ID: "1x3lHLwrixnqVFpUoxkEzqgmcn19Jhw19"
       run: |
-        python download_realdata.py --update-mode
+        python download_realdata.py --update-mode || echo "⚠️ 다운로드 스크립트 실패"
     
     - name: Upload new files to Google Drive
       if: always()
@@ -121,7 +121,22 @@ jobs:
         GDRIVE_FOLDER_ID: "1x3lHLwrixnqVFpUoxkEzqgmcn19Jhw19"
         OUTPUT_DIR: "output"
       run: |
-        python upload_to_gdrive.py --upload || echo "Upload failed"
+        python upload_to_gdrive.py --upload || echo "⚠️ Google Drive 업로드 실패"
+    
+    - name: List files for debugging
+      if: always()
+      run: |
+        echo "=== 현재 디렉토리 파일 ==="
+        ls -la || echo "ls 실패"
+        echo ""
+        echo "=== download_progress.json ==="
+        cat download_progress.json 2>/dev/null || echo "파일 없음"
+        echo ""
+        echo "=== existing_files.json ==="
+        cat existing_files.json 2>/dev/null || echo "파일 없음"
+        echo ""
+        echo "=== output 폴더 ==="
+        ls -la output/ 2>/dev/null || echo "output 폴더 없음"
     
     - name: Upload progress file as artifact
       if: always()
@@ -131,4 +146,6 @@ jobs:
         path: |
           download_progress.json
           existing_files.json
+          output/
+        if-no-files-found: warn
         retention-days: 7
