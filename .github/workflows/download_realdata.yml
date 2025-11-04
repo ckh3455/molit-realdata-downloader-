@@ -54,15 +54,19 @@ jobs:
     - name: Configure rclone
       run: |
         mkdir -p ~/.config/rclone
-        cat > ~/.config/rclone/rclone.conf << 'EOF'
-        ${{ secrets.RCLONE_CONFIG }}
-        EOF
+        echo "$RCLONE_CONFIG" > ~/.config/rclone/rclone.conf
         # 설정 파일 확인
         if [ ! -f ~/.config/rclone/rclone.conf ]; then
           echo "Error: rclone.conf file was not created"
           exit 1
         fi
+        if [ ! -s ~/.config/rclone/rclone.conf ]; then
+          echo "Error: rclone.conf file is empty"
+          exit 1
+        fi
         echo "rclone configuration file created successfully"
+      env:
+        RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
     
     - name: Verify rclone configuration
       run: |
