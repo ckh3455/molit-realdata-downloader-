@@ -1,0 +1,84 @@
+name: Test rclone Connection
+
+on:
+  workflow_dispatch:  # 수동 실행만
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install rclone
+      run: |
+        curl https://rclone.org/install.sh | sudo bash
+    
+    - name: Configure rclone
+      run: |
+        mkdir -p ~/.config/rclone
+        
+        # RCLONE_CONFIG 시크릿 확인
+        if [ -z "$RCLONE_CONFIG" ]; then
+          echo "❌ Error: RCLONE_CONFIG secret is empty or not set"
+          echo "⚠️  GitHub Secrets에 RCLONE_CONFIG를 추가해주세요."
+          exit 1
+        fi
+        
+        echo "✅ RCLONE_CONFIG 시크릿 확인됨 (길이: ${#RCLONE_CONFIG} 문자)"
+        
+        # 설정 파일 작성
+        echo "$RCLONE_CONFIG" > ~/.config/rclone/rclone.conf
+        
+        # 설정 파일 확인
+        if [ ! -f ~/.config/rclone/rclone.conf ]; then
+          echo "❌ Error: rclone.conf file was not created"
+          exit 1
+        fi
+        
+        if [ ! -s ~/.config/rclone/rclone.conf ]; then
+          echo "❌ Error: rclone.conf file is empty"
+          exit 1
+        fi
+        
+        echo "✅ rclone.conf 파일 생성 완료"
+        echo "📄 파일 크기: $(wc -c < ~/.config/rclone/rclone.conf) bytes"
+        echo ""
+        echo "📋 설정 파일 내용 (첫 500자):"
+        head -c 500 ~/.config/rclone/rclone.conf
+        
+      env:
+        RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+    
+    - name: Test rclone connection
+      run: |
+        echo "🔧 [1단계] rclone 버전 확인"
+        rclone version
+        
+        echo ""
+        echo "🔧 [2단계] 원격 목록 확인"
+        rclone listremotes || echo "❌ listremotes 실패"
+        
+        echo ""
+        echo "🔧 [3단계] onedrive 설정 확인"
+        rclone config show onedrive || echo "❌ config show 실패"
+        
+        echo ""
+        echo "🔧 [4단계] OneDrive 루트 폴더 목록 확인"
+        rclone lsd onedrive: || echo "❌ lsd 실패"
+        
+        echo ""
+        echo "🔧 [5단계] 'office work' 폴더 확인"
+        rclone lsd "onedrive:office work" || echo "❌ 'office work' 폴더 없음 또는 접근 실패"
+        
+        echo ""
+        echo "🔧 [6단계] '부동산 실거래 데이터' 폴더 확인"
+        rclone lsd "onedrive:office work/부동산 실거래 데이터" || echo "❌ '부동산 실거래 데이터' 폴더 없음 또는 접근 실패"
+        
+        echo ""
+        echo "🔧 [7단계] 폴더 내 파일 목록 확인 (최대 10개)"
+        rclone lsf "onedrive:office work/부동산 실거래 데이터" | head -10 || echo "❌ 파일 목록 가져오기 실패"
+        
+        echo ""
+        echo "✅ 모든 테스트 완료!"
