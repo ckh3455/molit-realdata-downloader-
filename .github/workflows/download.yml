@@ -28,10 +28,18 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
       
       - name: Create output directory
         run: mkdir -p output
+      
+      - name: Check existing files in Google Drive
+        env:
+          SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          SERVICE_ACCOUNT_JSON: service-account.json
+        run: |
+          echo "$SERVICE_ACCOUNT" > service-account.json
+          python upload_to_gdrive.py --check-existing
       
       - name: Run download script
         env:
@@ -39,90 +47,17 @@ jobs:
           CHROMEDRIVER_BIN: /usr/local/bin/chromedriver
           CHROME_BIN: /usr/bin/google-chrome
         run: |
-          python download_realdata.py --update-mode
+          python download_realdata.py
       
       - name: Upload to Google Drive
         env:
           SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-          FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          SERVICE_ACCOUNT_JSON: service-account.json
+          OUTPUT_DIR: output
         run: |
           echo "$SERVICE_ACCOUNT" > service-account.json
-          
-          python - <<'EOF'
-          import os
-          import json
-          from pathlib import Path
-          from google.oauth2 import service_account
-          from googleapiclient.discovery import build
-          from googleapiclient.http import MediaFileUpload
-          
-          SCOPES = ['https://www.googleapis.com/auth/drive.file']
-          
-          # 인증
-          creds = service_account.Credentials.from_service_account_file(
-              'service-account.json', scopes=SCOPES)
-          service = build('drive', 'v3', credentials=creds)
-          
-          # output 폴더의 모든 파일 업로드
-          output_dir = Path('output')
-          folder_id = os.environ['FOLDER_ID']
-          
-          uploaded_count = 0
-          
-          for folder_path in output_dir.iterdir():
-              if not folder_path.is_dir():
-                  continue
-              
-              folder_name = folder_path.name
-              
-              # Drive에서 해당 폴더 찾기 또는 생성
-              query = f"name='{folder_name}' and '{folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
-              results = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
-              items = results.get('files', [])
-              
-              if items:
-                  drive_folder_id = items[0]['id']
-                  print(f"📁 폴더 찾음: {folder_name}")
-              else:
-                  # 폴더 생성
-                  folder_metadata = {
-                      'name': folder_name,
-                      'mimeType': 'application/vnd.google-apps.folder',
-                      'parents': [folder_id]
-                  }
-                  folder_file = service.files().create(body=folder_metadata, fields='id').execute()
-                  drive_folder_id = folder_file.get('id')
-                  print(f"📁 폴더 생성: {folder_name}")
-              
-              # 폴더 안의 파일들 업로드
-              for file_path in folder_path.glob('*.xlsx'):
-                  file_name = file_path.name
-                  
-                  # 같은 이름 파일 찾기
-                  query = f"name='{file_name}' and '{drive_folder_id}' in parents and trashed=false"
-                  results = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
-                  items = results.get('files', [])
-                  
-                  if items:
-                      # 기존 파일 업데이트
-                      file_id = items[0]['id']
-                      media = MediaFileUpload(str(file_path), resumable=True)
-                      service.files().update(fileId=file_id, media_body=media).execute()
-                      print(f"  ✅ 업데이트: {file_name}")
-                  else:
-                      # 새 파일 업로드
-                      file_metadata = {
-                          'name': file_name,
-                          'parents': [drive_folder_id]
-                      }
-                      media = MediaFileUpload(str(file_path), resumable=True)
-                      service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-                      print(f"  ✅ 업로드: {file_name}")
-                  
-                  uploaded_count += 1
-          
-          print(f"\n🎉 총 {uploaded_count}개 파일 처리 완료!")
-          EOF
+          python upload_to_gdrive.py --upload
       
       - name: Upload logs as artifact
         if: always()
@@ -131,4 +66,5 @@ jobs:
           name: download-logs
           path: |
             download_progress.json
+            existing_files.json
             *.log
