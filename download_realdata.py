@@ -6,7 +6,7 @@
 - 진행 상황 저장 및 재개
 - 100회 제한 대응 (다음날 자동 재개)
 - 업데이트 모드 (최근 1년만 갱신)
-- 로컬 OneDrive 폴더 직접 사용 또는 rclone 사용
+- Microsoft Graph API를 사용한 OneDrive 통합
 파일명: download_realdata.py
 """
 
@@ -16,7 +16,6 @@ import sys
 import json
 import time
 import argparse
-import subprocess
 import stat
 from pathlib import Path
 from datetime import date, datetime, timedelta
@@ -32,6 +31,22 @@ from selenium.common.exceptions import UnexpectedAlertPresentException
 # config.py에서 설정 가져오기
 import config
 
+# CI 환경에서 OneDrive 클라이언트 초기화
+onedrive_client = None
+if config.IS_CI:
+    client_id = os.getenv("AZURE_CLIENT_ID")
+    client_secret = os.getenv("AZURE_CLIENT_SECRET")
+    tenant_id = os.getenv("AZURE_TENANT_ID")
+    
+    if client_id and client_secret and tenant_id:
+        try:
+            from onedrive_client import OneDriveClient
+            onedrive_client = OneDriveClient(client_id, client_secret, tenant_id)
+            print(f"✅ OneDrive 클라이언트 초기화 완료")
+        except Exception as e:
+            print(f"⚠️  OneDrive 클라이언트 초기화 실패: {e}")
+            onedrive_client = None
+
 # ==================== 설정 (config.py에서 가져옴) ====================
 
 IS_CI = config.IS_CI
@@ -40,8 +55,8 @@ TEMP_DOWNLOAD_DIR = config.TEMP_DOWNLOAD_DIR
 MOLIT_URL = config.MOLIT_URL
 PROPERTY_TYPES = config.PROPERTY_TYPES
 
-# CI 환경에서만 OneDrive 관련 설정
-ONEDRIVE_REMOTE = os.getenv("ONEDRIVE_REMOTE", "onedrive:office work/부동산 실거래 데이터") if IS_CI else None
+# CI 환경에서 OneDrive 기본 폴더
+ONEDRIVE_BASE_FOLDER = os.getenv("ONEDRIVE_BASE_FOLDER", "office work/부동산 실거래 데이터")
 
 # 진행 상황 파일
 PROGRESS_FILE = Path("download_progress.json")
@@ -60,93 +75,57 @@ def sanitize_folder_name(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '_', name)
 
 def upload_to_onedrive(local_path: Path, remote_path: str) -> bool:
-    """rclone을 사용하여 OneDrive에 업로드"""
-    if not IS_CI or not ONEDRIVE_REMOTE:
+    """Microsoft Graph API를 사용하여 OneDrive에 업로드"""
+    if not IS_CI or not onedrive_client:
         return True  # 로컬에서는 불필요 (이미 로컬 OneDrive 폴더에 저장됨)
     
     try:
         log(f"  ☁️  OneDrive 업로드 시작: {remote_path}")
         
-        # rclone 명령어 실행
-        cmd = [
-            "rclone", "copy",
-            str(local_path),
-            f"{ONEDRIVE_REMOTE}/{remote_path}",
-            "--progress",
-            "--transfers", "1",
-            "--checkers", "1"
-        ]
-        log(f"  🔧 [RCLONE] 명령어: {' '.join(cmd)}")
+        # 전체 경로 구성
+        full_remote_path = f"{ONEDRIVE_BASE_FOLDER}/{remote_path}"
         
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300  # 5분 타임아웃
-        )
+        success = onedrive_client.upload_file(local_path, full_remote_path)
         
-        log(f"  🔧 [RCLONE] 반환 코드: {result.returncode}")
-        if result.stdout:
-            log(f"  🔧 [RCLONE] stdout: {result.stdout[:200]}")
-        if result.stderr:
-            log(f"  🔧 [RCLONE] stderr: {result.stderr[:500]}")
-        
-        if result.returncode == 0:
+        if success:
             log(f"  ✅ OneDrive 업로드 완료")
-            return True
         else:
-            log(f"  ❌ OneDrive 업로드 실패 (코드: {result.returncode})")
-            if "drive_id" in result.stderr or "drive_type" in result.stderr:
-                log(f"  🔧 [RCLONE] drive_id/drive_type 오류 감지 - rclone 설정 확인 필요")
-            return False
+            log(f"  ❌ OneDrive 업로드 실패")
+        
+        return success
             
-    except subprocess.TimeoutExpired:
-        log(f"  ⏱️  업로드 타임아웃 (5분)")
-        return False
     except Exception as e:
         log(f"  ❌ 업로드 오류: {e}")
         return False
 
 def sync_progress_to_onedrive() -> bool:
     """진행 상황 파일을 OneDrive에 동기화"""
-    if not IS_CI or not ONEDRIVE_REMOTE:
+    if not IS_CI or not onedrive_client:
         return True  # 로컬에서는 불필요
     
     try:
         log("  ☁️  진행 상황 파일 동기화 중...")
         
-        cmd = [
-            "rclone", "copy",
-            str(PROGRESS_FILE),
-            f"{ONEDRIVE_REMOTE}/",
-            "--no-check-dest"
-        ]
+        remote_path = f"{ONEDRIVE_BASE_FOLDER}/{PROGRESS_FILE.name}"
+        success = onedrive_client.upload_file(PROGRESS_FILE, remote_path)
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        
-        return result.returncode == 0
+        return success
     except Exception as e:
         log(f"  ⚠️  진행 상황 동기화 실패: {e}")
         return False
 
 def download_progress_from_onedrive() -> dict:
     """OneDrive에서 진행 상황 파일 다운로드"""
-    if not IS_CI or not ONEDRIVE_REMOTE:
+    if not IS_CI or not onedrive_client:
         return {}
     
     try:
         log("  ☁️  진행 상황 파일 다운로드 중...")
         
-        cmd = [
-            "rclone", "copy",
-            f"{ONEDRIVE_REMOTE}/{PROGRESS_FILE.name}",
-            ".",
-            "--no-check-dest"
-        ]
+        remote_path = f"{ONEDRIVE_BASE_FOLDER}/{PROGRESS_FILE.name}"
+        success = onedrive_client.download_file(remote_path, PROGRESS_FILE)
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        
-        if result.returncode == 0 and PROGRESS_FILE.exists():
+        if success and PROGRESS_FILE.exists():
             log("  ✅ 진행 상황 파일 다운로드 완료")
         else:
             log("  ℹ️  진행 상황 파일이 없습니다 (처음 실행)")
@@ -157,7 +136,7 @@ def download_progress_from_onedrive() -> dict:
 
 def list_files_in_onedrive_folder(property_type: str) -> set:
     """OneDrive 폴더의 파일 목록 가져오기"""
-    if not IS_CI or not ONEDRIVE_REMOTE:
+    if not IS_CI or not onedrive_client:
         # 로컬 환경에서는 로컬 파일 시스템에서 확인
         folder_name = sanitize_folder_name(property_type)
         folder_path = DOWNLOAD_DIR / folder_name
@@ -169,37 +148,23 @@ def list_files_in_onedrive_folder(property_type: str) -> set:
     
     try:
         folder_name = sanitize_folder_name(property_type)
-        remote_path = f"{ONEDRIVE_REMOTE}/{folder_name}/"
+        remote_path = f"{ONEDRIVE_BASE_FOLDER}/{folder_name}"
         
-        log(f"  🔧 [RCLONE] 폴더 목록 조회 시작: {property_type}")
+        log(f"  📁 OneDrive 폴더 목록 조회: {property_type}")
+        files = onedrive_client.list_files(remote_path)
         
-        # rclone으로 파일 목록 가져오기
-        cmd = ["rclone", "lsf", remote_path]
+        log(f"  📁 OneDrive에서 {len(files)}개 파일 발견: {property_type}")
+        if len(files) > 0 and len(files) <= 10:
+            log(f"  📋 파일 목록: {list(files)[:10]}")
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        
-        log(f"  🔧 [RCLONE] 반환 코드: {result.returncode}")
-        
-        if result.stderr:
-            log(f"  🔧 [RCLONE] stderr: {result.stderr[:500]}")
-        
-        if result.returncode == 0:
-            # 파일명만 추출 (확장자 포함)
-            files = {line.strip() for line in result.stdout.strip().split('\n') if line.strip()}
-            log(f"  📁 OneDrive에서 {len(files)}개 파일 발견: {property_type}")
-            if len(files) > 0 and len(files) <= 10:
-                log(f"  🔧 [RCLONE] 파일 목록: {list(files)}")
-            return files
-        else:
-            log(f"  ⚠️  OneDrive 폴더 목록 가져오기 실패")
-            return set()
+        return files
     except Exception as e:
         log(f"  ⚠️  OneDrive 파일 목록 확인 실패: {e}")
         return set()
 
 def check_file_exists_in_onedrive(property_type: str, year: int, month: int, onedrive_files: set = None) -> bool:
     """OneDrive에서 파일 존재 여부 확인"""
-    if not IS_CI or not ONEDRIVE_REMOTE:
+    if not IS_CI or not onedrive_client:
         # 로컬 환경에서는 로컬 파일 시스템에서 확인
         folder_name = sanitize_folder_name(property_type)
         filename = f"{property_type} {year:04d}{month:02d}.xlsx"
@@ -216,16 +181,13 @@ def check_file_exists_in_onedrive(property_type: str, year: int, month: int, one
     # 직접 확인
     try:
         folder_name = sanitize_folder_name(property_type)
-        remote_path = f"{ONEDRIVE_REMOTE}/{folder_name}/{filename}"
-        
-        # rclone으로 파일 존재 확인
-        cmd = ["rclone", "lsf", remote_path]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        
-        return result.returncode == 0 and result.stdout.strip() != ""
+        remote_path = f"{ONEDRIVE_BASE_FOLDER}/{folder_name}/{filename}"
+        return onedrive_client.file_exists(remote_path)
     except Exception as e:
         log(f"  ⚠️  OneDrive 파일 확인 실패: {e}")
         return False
+
+# ... (나머지 함수들은 동일하므로 생략) ...
 
 def build_driver():
     """크롬 드라이버 생성 - 간소화된 버전"""
@@ -834,7 +796,7 @@ def main():
             
             # 파일 목록 가져오기 (로컬 또는 OneDrive)
             onedrive_files = None
-            if IS_CI and ONEDRIVE_REMOTE:
+            if IS_CI:
                 onedrive_files = list_files_in_onedrive_folder(property_type)
             elif not IS_CI:
                 # 로컬 환경에서는 로컬 파일 시스템에서 확인
