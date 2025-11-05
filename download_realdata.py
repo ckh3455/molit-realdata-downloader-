@@ -154,24 +154,42 @@ def select_property_tab(driver, tab_name: str) -> bool:
         try_accept_alert(driver, 2.0)
     
     # 페이지가 완전히 로드될 때까지 대기
-    time.sleep(2)
+    time.sleep(3)
+    try_accept_alert(driver, 2.0)
     
-    # 다양한 방법으로 탭 찾기
+    # 방법 1: 다양한 XPath 선택자 시도
     selectors = [
         f"//ul[@class='quarter-tab-cover']//a[contains(text(), '{tab_name}')]",
+        f"//ul[@class='quarter-tab-cover']//a[normalize-space(text())='{tab_name}']",
         f"//a[contains(text(), '{tab_name}')]",
-        f"//a[text()='{tab_name}']"
+        f"//a[normalize-space(text())='{tab_name}']",
+        f"//a[text()='{tab_name}']",
+        f"//li//a[contains(text(), '{tab_name}')]",
+        f"//*[@class='tab']//a[contains(text(), '{tab_name}')]",
+        f"//*[contains(@class, 'tab')]//a[contains(text(), '{tab_name}')]",
     ]
     
     for idx, selector in enumerate(selectors, 1):
         try:
-            log(f"  🔍 탭 찾기 시도 {idx}/{len(selectors)}")
+            log(f"  🔍 탭 찾기 시도 {idx}/{len(selectors)} (XPath)")
             elem = driver.find_element(By.XPATH, selector)
+            
+            # 요소가 보이는지 확인
+            if not elem.is_displayed():
+                log(f"  ⚠️  요소가 보이지 않음, 스크롤 시도...")
+                driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", elem)
+                time.sleep(1)
             
             # 스크롤 및 클릭
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
             time.sleep(0.5)
-            elem.click()
+            
+            # JavaScript로 클릭 시도
+            try:
+                driver.execute_script("arguments[0].click();", elem)
+            except:
+                elem.click()
+            
             time.sleep(2)
             try_accept_alert(driver, 2.0)
             
@@ -180,11 +198,77 @@ def select_property_tab(driver, tab_name: str) -> bool:
             
         except Exception as e:
             if idx == len(selectors):
-                log(f"  ❌ 탭 선택 실패: {e}")
+                log(f"  ⏭️  XPath 선택자 모두 실패, 다른 방법 시도...")
             else:
-                log(f"  ⏭️  다음 선택자 시도...")
-            continue
+                continue
     
+    # 방법 2: 모든 링크를 찾아서 텍스트로 비교
+    try:
+        log(f"  🔍 모든 링크 검색 중...")
+        all_links = driver.find_elements(By.TAG_NAME, "a")
+        log(f"  📋 발견된 링크: {len(all_links)}개")
+        
+        for link in all_links:
+            try:
+                link_text = link.text.strip()
+                if tab_name in link_text or link_text == tab_name:
+                    log(f"  ✅ 링크 발견: '{link_text}'")
+                    
+                    # 요소가 보이는지 확인
+                    if not link.is_displayed():
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", link)
+                        time.sleep(1)
+                    
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", link)
+                    time.sleep(0.5)
+                    
+                    # JavaScript로 클릭 시도
+                    try:
+                        driver.execute_script("arguments[0].click();", link)
+                    except:
+                        link.click()
+                    
+                    time.sleep(2)
+                    try_accept_alert(driver, 2.0)
+                    
+                    log(f"  ✅ 탭 선택 완료: {tab_name}")
+                    return True
+            except:
+                continue
+    except Exception as e:
+        log(f"  ⚠️  링크 검색 실패: {e}")
+    
+    # 방법 3: CSS 선택자로 시도
+    try:
+        log(f"  🔍 CSS 선택자 시도...")
+        css_selectors = [
+            f"a:contains('{tab_name}')",  # 일부 브라우저에서만 작동
+            f"a[href*='{tab_name.lower()}']",
+        ]
+        
+        # CSS 선택자 대신 JavaScript로 찾기
+        script = f"""
+        var links = document.querySelectorAll('a');
+        for (var i = 0; i < links.length; i++) {{
+            var text = links[i].textContent.trim();
+            if (text === '{tab_name}' || text.includes('{tab_name}')) {{
+                links[i].scrollIntoView({{block: 'center'}});
+                links[i].click();
+                return true;
+            }}
+        }}
+        return false;
+        """
+        result = driver.execute_script(script)
+        if result:
+            time.sleep(2)
+            try_accept_alert(driver, 2.0)
+            log(f"  ✅ 탭 선택 완료 (JavaScript): {tab_name}")
+            return True
+    except Exception as e:
+        log(f"  ⚠️  JavaScript 클릭 실패: {e}")
+    
+    log(f"  ❌ 탭 선택 실패: 모든 방법 시도 완료")
     return False
 
 def find_date_inputs(driver) -> Tuple[object, object]:
