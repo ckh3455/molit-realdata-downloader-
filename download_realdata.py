@@ -277,7 +277,7 @@ def click_excel_download(driver) -> bool:
         log(f"  ❌ 다운 버튼 클릭 실패: {e}")
         return False
 
-def wait_for_download(timeout: int = 30, baseline_files: set = None) -> Optional[Path]:
+def wait_for_download(timeout: int = 10, baseline_files: set = None) -> Optional[Path]:
     """다운로드 완료 대기 - 개선된 감지 로직"""
     start_time = time.time()
     
@@ -329,8 +329,8 @@ def wait_for_download(timeout: int = 30, baseline_files: set = None) -> Optional
             
             # 파일이 있고 크기가 1KB 이상이면
             if size > 1000:
-                # 크기 안정화 확인 (0.5초 대기)
-                time.sleep(0.5)
+                # 크기 안정화 확인 (5초 대기)
+                time.sleep(5)
                 new_size = latest.stat().st_size
                 
                 # 크기가 안정화되면 성공
@@ -543,8 +543,8 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                 continue
             return False
         
-        # 다운로드 대기 (30초)
-        downloaded = wait_for_download(timeout=30, baseline_files=baseline_files)
+        # 다운로드 대기 (10초)
+        downloaded = wait_for_download(timeout=10, baseline_files=baseline_files)
         
         if downloaded:
             # 성공! 이동 및 이름 변경
@@ -685,11 +685,38 @@ def main():
             prop_key = sanitize_folder_name(property_type)
             last_completed = progress.get(prop_key, {}).get("last_month", "")
             
+            # 이 섹션에 대한 월별 날짜 범위 생성
+            if update_mode:
+                # 업데이트 모드: 최근 1년만 갱신 (last_completed와 무관하게)
+                today = date.today()
+                start_year = today.year - 1
+                start_month = today.month
+                section_monthly_dates = generate_monthly_dates(start_year, start_month)
+            else:
+                # 전체 다운로드 모드: 2006-01부터
+                if last_completed:
+                    # last_completed 다음 달부터 시작
+                    last_year = int(last_completed[:4])
+                    last_month = int(last_completed[4:6])
+                    if last_month == 12:
+                        start_year = last_year + 1
+                        start_month = 1
+                    else:
+                        start_year = last_year
+                        start_month = last_month + 1
+                else:
+                    # 파일이 없으면 2006-01부터
+                    start_year = 2006
+                    start_month = 1
+                section_monthly_dates = generate_monthly_dates(start_year, start_month)
+            
             if last_completed:
                 log(f"📌 마지막 완료: {last_completed}")
-                log(f"🔄 이어서 진행합니다...")
+                log(f"🔄 이어서 진행합니다... ({start_year:04d}-{start_month:02d}부터)")
             else:
-                log(f"🆕 처음 시작합니다")
+                log(f"🆕 처음 시작합니다 ({start_year:04d}-{start_month:02d}부터)")
+            
+            log(f"📅 다운로드 예정: {len(section_monthly_dates)}개월")
             
             # 각 월별로
             success_count = 0
@@ -697,19 +724,12 @@ def main():
             consecutive_fails = 0
             skipped_count = 0
             
-            for month_idx, (start_date, end_date) in enumerate(monthly_dates, 1):
+            for month_idx, (start_date, end_date) in enumerate(section_monthly_dates, 1):
                 year = start_date.year
                 month = start_date.month
                 month_key = f"{year:04d}{month:02d}"
                 
-                # 이미 완료한 달 스킵
-                if last_completed and month_key <= last_completed:
-                    skipped_count += 1
-                    if skipped_count == 1:
-                        log(f"\n⏭️  이미 완료된 월들을 건너뜁니다...")
-                    continue
-                
-                log(f"\n[{month_idx}/{len(monthly_dates)}]", end=" ")
+                log(f"\n[{month_idx}/{len(section_monthly_dates)}]", end=" ")
                 
                 # 다운로드 시도 (최대 3회 재시도)
                 success = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3)
