@@ -14,17 +14,27 @@ from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
 # ==================== 설정 ====================
+# 서비스 계정 정보
+# 이메일: naver-crawling-476404@appspot.gserviceaccount.com
+# 프로젝트 ID: naver-crawling-476404
+
 # 서비스 계정 파일 경로 (환경 변수 또는 직접 지정)
 SERVICE_ACCOUNT_FILE = os.getenv(
     "GOOGLE_SERVICE_ACCOUNT_FILE",
-    r"C:\Users\Hello\OneDrive\office work\naver crawling\naver-crawling-476404-fcf4b10bc63e 클라우드 서비스계정.txt"
+    r"D:\OneDrive\office work\naver crawling\naver-crawling-476404-fcf4b10bc63e 클라우드 서비스계정.txt"
 )
 
-# Shared Drive ID (환경 변수 또는 직접 지정)
-SHARED_DRIVE_ID = os.getenv("GOOGLE_SHARED_DRIVE_ID", "0APa-MWwUseXzUk9PVA")
+# "부동산자료" 폴더 ID (환경 변수 또는 직접 지정)
+# GDRIVE_FOLDER_ID는 "부동산자료" 폴더의 ID입니다
+GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID", "0APa-MWwUseXzUk9PVA")
 
-# 부모 폴더 경로 (부동산자료 > 부동산 실거래자료)
-PARENT_FOLDER_PATH = ["부동산자료", "부동산 실거래자료"]
+# Shared Drive ID는 폴더 정보에서 가져오지만, 파라미터로 사용하지 않음
+# 상위 폴더 ID(GDRIVE_FOLDER_ID)만으로 하위 폴더 접근 가능
+SHARED_DRIVE_ID = None  # 사용하지 않음
+
+# 부모 폴더 경로
+# GDRIVE_FOLDER_ID가 "부동산자료" 폴더이므로, 그 하위의 "부동산 실거래자료"만 찾으면 됩니다
+PARENT_FOLDER_PATH = ["부동산 실거래자료"]
 
 # Google Drive API 스코프
 SCOPES = ['https://www.googleapis.com/auth/drive']
@@ -44,23 +54,25 @@ class DriveUploader:
             return True
             
         try:
-            # 서비스 계정 파일 읽기
-            if os.path.exists(SERVICE_ACCOUNT_FILE):
+            # 환경 변수 우선 확인 (GitHub Actions용)
+            service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+            
+            if service_account_json:
+                # 환경 변수에서 JSON 문자열로 읽기
+                creds = service_account.Credentials.from_service_account_info(
+                    json.loads(service_account_json),
+                    scopes=SCOPES
+                )
+            elif os.path.exists(SERVICE_ACCOUNT_FILE):
+                # 서비스 계정 파일 읽기 (로컬 실행용)
                 creds = service_account.Credentials.from_service_account_file(
                     SERVICE_ACCOUNT_FILE,
                     scopes=SCOPES
                 )
             else:
-                # 환경 변수에서 JSON 문자열로 읽기 (GitHub Actions용)
-                service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-                if not service_account_json:
-                    raise FileNotFoundError(
-                        f"서비스 계정 파일을 찾을 수 없습니다: {SERVICE_ACCOUNT_FILE}\n"
-                        "또는 GOOGLE_SERVICE_ACCOUNT_JSON 환경 변수를 설정하세요."
-                    )
-                creds = service_account.Credentials.from_service_account_info(
-                    json.loads(service_account_json),
-                    scopes=SCOPES
+                raise FileNotFoundError(
+                    f"서비스 계정 파일을 찾을 수 없습니다: {SERVICE_ACCOUNT_FILE}\n"
+                    "또는 GOOGLE_SERVICE_ACCOUNT_JSON 환경 변수를 설정하세요."
                 )
             
             self.drive = build('drive', 'v3', credentials=creds)
@@ -91,9 +103,10 @@ class DriveUploader:
                 'includeItemsFromAllDrives': True,
             }
             
-            if SHARED_DRIVE_ID:
-                params['driveId'] = SHARED_DRIVE_ID
-                params['corpora'] = 'drive'
+            # files().list()에서 parent_folder_id 조건이 있으면
+            # 해당 폴더 내에서만 검색하므로 driveId 불필요
+            # supportsAllDrives와 includeItemsFromAllDrives만으로 충분
+            # driveId는 절대 파라미터로 전달하지 않음!
             
             results = self.drive.files().list(**params).execute()
             items = results.get('files', [])
@@ -106,6 +119,13 @@ class DriveUploader:
             return None
         except HttpError as e:
             print(f"  ❌ 폴더 검색 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+        except Exception as e:
+            print(f"  ❌ 폴더 검색 중 예외 발생: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def create_folder(self, folder_name: str, parent_folder_id: str = None) -> Optional[str]:
@@ -122,11 +142,11 @@ class DriveUploader:
             params = {
                 'body': file_metadata,
                 'fields': 'id, name',
-                'supportsAllDrives': True,
+                'supportsAllDrives': True,  # Shared Drive 지원 필수
             }
             
-            if SHARED_DRIVE_ID:
-                params['driveId'] = SHARED_DRIVE_ID
+            # files().create()에는 driveId 파라미터가 없음
+            # supportsAllDrives만으로 충분함
             
             folder = self.drive.files().create(**params).execute()
             folder_id = folder.get('id')
@@ -154,8 +174,27 @@ class DriveUploader:
     def get_folder_path_ids(self) -> Optional[Dict[str, str]]:
         """부모 폴더 경로의 각 폴더 ID 가져오기"""
         folder_ids = {}
-        current_parent = None
         
+        # GDRIVE_FOLDER_ID가 "부동산자료" 폴더 ID이므로 이를 시작점으로 사용
+        current_parent = GDRIVE_FOLDER_ID
+        
+        # "부동산자료" 폴더 정보 확인
+        # 상위 폴더 ID만으로 하위 폴더 접근 가능하므로 driveId 파라미터 불필요
+        try:
+            folder_info = self.drive.files().get(
+                fileId=GDRIVE_FOLDER_ID,
+                fields='id, name',
+                supportsAllDrives=True
+                # 상위 폴더 ID만으로 하위 폴더 접근 가능
+                # driveId 파라미터는 사용하지 않음
+            ).execute()
+            
+            print(f"  ✅ 부동산자료 폴더 확인: {folder_info.get('name')} (ID: {GDRIVE_FOLDER_ID})")
+        except Exception as e:
+            print(f"  ❌ 부동산자료 폴더 접근 실패: {e}")
+            return None
+        
+        # "부동산 실거래자료" 폴더 찾기
         for folder_name in PARENT_FOLDER_PATH:
             folder_id = self.find_folder_by_name(folder_name, current_parent)
             
@@ -208,11 +247,11 @@ class DriveUploader:
                 'body': file_metadata,
                 'media': media,
                 'fields': 'id, name, webViewLink, size',
-                'supportsAllDrives': True,
+                'supportsAllDrives': True,  # Shared Drive 지원 필수
             }
             
-            if SHARED_DRIVE_ID:
-                params['driveId'] = SHARED_DRIVE_ID
+            # files().create()에는 driveId 파라미터가 없음
+            # supportsAllDrives만으로 충분함
             
             file = self.drive.files().create(**params).execute()
             file_id = file.get('id')
@@ -238,19 +277,33 @@ class DriveUploader:
         """파일이 이미 존재하는지 확인"""
         try:
             # 부모 폴더 경로 확인
+            print(f"  [DEBUG] 폴더 경로 확인 시작...")
             path_ids = self.get_folder_path_ids()
             if not path_ids:
+                print(f"  ⚠️  폴더 경로를 찾을 수 없습니다")
                 return False
+            print(f"  [DEBUG] 폴더 경로 확인 완료: {path_ids}")
             
             # 섹션별 폴더 찾기
+            # PARENT_FOLDER_PATH[-1] = "부동산 실거래자료" 폴더 ID
             section_parent_id = path_ids[PARENT_FOLDER_PATH[-1]]
+            if not section_parent_id:
+                print(f"  ⚠️  부모 폴더 ID를 찾을 수 없습니다")
+                return False
+            print(f"  [DEBUG] 부모 폴더 ID: {section_parent_id}")
+            
+            # 섹션 폴더 찾기 (예: "아파트" 폴더)
+            print(f"  [DEBUG] 섹션 폴더 찾기: {section_folder_name}")
             section_folder_id = self.find_folder_by_name(section_folder_name, section_parent_id)
             
             if not section_folder_id:
+                print(f"  ℹ️  섹션 폴더를 찾을 수 없습니다: {section_folder_name} (부모: {section_parent_id})")
                 return False
+            print(f"  [DEBUG] 섹션 폴더 ID: {section_folder_id}")
             
             # 파일 검색
             query = f"name='{file_name}' and '{section_folder_id}' in parents and trashed=false"
+            print(f"  [DEBUG] 파일 검색 쿼리: {query}")
             
             params = {
                 'q': query,
@@ -259,17 +312,28 @@ class DriveUploader:
                 'includeItemsFromAllDrives': True,
             }
             
-            if SHARED_DRIVE_ID:
-                params['driveId'] = SHARED_DRIVE_ID
-                params['corpora'] = 'drive'
+            print(f"  [DEBUG] API 호출 파라미터: {params}")
+            print(f"  [DEBUG] driveId 파라미터 확인: {'driveId' in params}")
+            
+            # files().list()에서 Shared Drive 검색 시
+            # supportsAllDrives와 includeItemsFromAllDrives만으로 충분
+            # driveId 파라미터는 사용하지 않음
             
             results = self.drive.files().list(**params).execute()
             items = results.get('files', [])
             
-            return len(items) > 0
+            found = len(items) > 0
+            if found:
+                print(f"  ✅ 파일 존재 확인: {file_name} (섹션: {section_folder_name})")
+            
+            return found
             
         except Exception as e:
             print(f"  ⚠️  파일 존재 확인 실패: {e}")
+            print(f"  [ERROR] 예외 타입: {type(e).__name__}")
+            import traceback
+            print("  [ERROR] 전체 traceback:")
+            traceback.print_exc()
             return False
 
 
