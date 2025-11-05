@@ -416,9 +416,43 @@ def generate_monthly_dates(start_year: int = 2006, start_month: int = 1) -> List
 
 def load_progress() -> dict:
     """진행 상황 로드"""
+    # 먼저 로컬 파일 확인
     if PROGRESS_FILE.exists():
         with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            progress = json.load(f)
+            # 비어있지 않으면 사용
+            if progress:
+                return progress
+    
+    # 로컬 파일이 없거나 비어있으면 Google Drive에서 확인
+    if DRIVE_UPLOAD_ENABLED:
+        try:
+            log("📂 Google Drive에서 진행 상황 확인 중...")
+            uploader = get_uploader()
+            if uploader.init_service():
+                progress = {}
+                for property_type in PROPERTY_TYPES:
+                    prop_key = sanitize_folder_name(property_type)
+                    last_month = uploader.get_last_file_month(property_type)
+                    if last_month:
+                        year, month = last_month
+                        month_key = f"{year:04d}{month:02d}"
+                        progress[prop_key] = {
+                            "last_month": month_key,
+                            "last_update": datetime.now().isoformat()
+                        }
+                        log(f"  ✅ {property_type}: {month_key}까지 완료")
+                    else:
+                        log(f"  ℹ️  {property_type}: 파일 없음 (처음 시작)")
+                
+                if progress:
+                    # 로컬에도 저장
+                    save_progress(progress)
+                    log("💾 진행 상황을 로컬 파일에 저장했습니다.")
+                    return progress
+        except Exception as e:
+            log(f"⚠️  Google Drive 확인 실패: {e}")
+    
     return {}
 
 def save_progress(progress: dict):
@@ -556,26 +590,52 @@ def main():
     # 진행 상황 로드
     progress = load_progress()
     
+    # 다운로드가 필요한 섹션 확인 (2006-01부터 현재까지 완료 여부)
+    today = date.today()
+    target_month_key = f"{today.year:04d}{today.month:02d}"
+    properties_to_download = []
+    
+    log("📋 각 섹션별 완료 상태 확인 중...")
+    for property_type in PROPERTY_TYPES:
+        prop_key = sanitize_folder_name(property_type)
+        last_completed = progress.get(prop_key, {}).get("last_month", "")
+        
+        if not last_completed:
+            # 파일이 하나도 없으면 2006-01부터 다운로드 필요
+            properties_to_download.append(property_type)
+            log(f"  ⬇️  {property_type}: 파일 없음 → 2006-01부터 다운로드 필요")
+        elif last_completed < target_month_key:
+            # 2006-01부터 현재까지 완료되지 않았으면 다운로드 필요
+            properties_to_download.append(property_type)
+            log(f"  ⬇️  {property_type}: {last_completed}까지 완료 → {target_month_key}까지 필요 (2006-01부터)")
+        else:
+            # 2006-01부터 현재까지 모두 완료되었으면 스킵
+            log(f"  ✅ {property_type}: {last_completed}까지 완료 → 스킵")
+    
+    log("")
+    
     # 모드 결정
     if args.update_mode:
         # 강제 업데이트 모드
         update_mode = True
-        log("🔄 업데이트 모드: 최근 1년치만 갱신")
+        log("🔄 강제 업데이트 모드: 최근 1년치만 갱신")
+        properties_to_download = PROPERTY_TYPES  # 모든 섹션 처리
+    elif not properties_to_download:
+        # 모든 섹션이 완료되었으면 업데이트 모드로 전환
+        update_mode = True
+        log("✅ 모든 섹션이 2006-01부터 현재까지 완료되었습니다!")
+        log("🔄 업데이트 모드로 전환: 최근 1년치만 갱신")
+        properties_to_download = PROPERTY_TYPES  # 모든 섹션을 업데이트 모드로 처리
     else:
-        # 자동 판단
-        update_mode = check_if_all_historical_complete(progress)
-        if update_mode:
-            log("✅ 과거 데이터 완료 확인")
-            log("🔄 업데이트 모드로 전환: 최근 1년치만 갱신")
-        else:
-            log("📥 전체 다운로드 모드: 2006-01부터 현재까지")
+        # 완료되지 않은 섹션이 있으면 전체 다운로드 모드
+        update_mode = False
+        log(f"📥 전체 다운로드 모드: {len(properties_to_download)}개 섹션 (2006-01부터)")
     
     log("")
     
     # 날짜 범위 생성
     if update_mode:
         # 최근 1년 (13개월 - 여유있게)
-        today = date.today()
         start_year = today.year - 1
         start_month = today.month
         monthly_dates = generate_monthly_dates(start_year, start_month)
@@ -583,7 +643,7 @@ def main():
     else:
         # 전체 기간
         monthly_dates = generate_monthly_dates(2006, 1)
-        log(f"📅 다운로드 기간: 2006-01 ~ {date.today().strftime('%Y-%m')} ({len(monthly_dates)}개월)")
+        log(f"📅 다운로드 기간: 2006-01 ~ {today.strftime('%Y-%m')} ({len(monthly_dates)}개월)")
     
     # 테스트 모드
     if args.test_mode:
@@ -610,10 +670,10 @@ def main():
         total_success = 0
         total_fail = 0
         
-        # 각 부동산 종목별로
-        for prop_idx, property_type in enumerate(PROPERTY_TYPES, 1):
+        # 다운로드가 필요한 섹션만 처리
+        for prop_idx, property_type in enumerate(properties_to_download, 1):
             log("="*70)
-            log(f"📊 [{prop_idx}/{len(PROPERTY_TYPES)}] {property_type}")
+            log(f"📊 [{prop_idx}/{len(properties_to_download)}] {property_type}")
             log("="*70)
             
             # 탭 선택
