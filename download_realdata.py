@@ -5,7 +5,6 @@
 - 진행 상황 저장 및 재개
 - 100회 제한 대응 (다음날 자동 재개)
 - 업데이트 모드 (최근 1년만 갱신)
-- Google Shared Drive 자동 업로드
 
 파일명: download_realdata.py
 """
@@ -18,7 +17,6 @@ import argparse
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple, List
-
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -31,7 +29,6 @@ try:
     from drive_uploader import get_uploader
     DRIVE_UPLOAD_ENABLED = True
 except ImportError:
-    print("⚠️  drive_uploader 모듈을 찾을 수 없습니다. Google Drive 업로드가 비활성화됩니다.")
     DRIVE_UPLOAD_ENABLED = False
 
 # ==================== 설정 ====================
@@ -69,24 +66,20 @@ PROGRESS_FILE = Path("download_progress.json")
 # 임시 다운로드 폴더 생성
 TEMP_DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-
 def log(msg: str, end="\n"):
     """로그 출력"""
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{timestamp}] {msg}", end=end, flush=True)
 
-
 def sanitize_folder_name(name: str) -> str:
     """폴더명에서 특수문자 제거"""
     return re.sub(r'[<>:"/\\|?*]', '_', name)
-
 
 def build_driver():
     """크롬 드라이버 생성"""
     opts = Options()
     if IS_CI:
         opts.add_argument("--headless=new")
-    
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
@@ -123,7 +116,6 @@ def build_driver():
     driver = webdriver.Chrome(service=service, options=opts)
     return driver
 
-
 def try_accept_alert(driver, timeout=3.0) -> bool:
     """Alert 자동 수락 - 100건 제한 감지"""
     end_time = time.time() + timeout
@@ -149,7 +141,6 @@ def try_accept_alert(driver, timeout=3.0) -> bool:
                 raise  # 100건 제한은 상위로 전달
             time.sleep(0.2)
     return False
-
 
 def select_property_tab(driver, tab_name: str) -> bool:
     """부동산 종목 탭 선택 - 강화 버전"""
@@ -196,7 +187,6 @@ def select_property_tab(driver, tab_name: str) -> bool:
     
     return False
 
-
 def find_date_inputs(driver) -> Tuple[object, object]:
     """시작일/종료일 입력 박스 찾기"""
     # 명시적 ID 우선
@@ -221,7 +211,6 @@ def find_date_inputs(driver) -> Tuple[object, object]:
         return dates[0], dates[1]
     
     raise RuntimeError("날짜 입력 박스를 찾을 수 없습니다")
-
 
 def set_dates(driver, start_date: date, end_date: date) -> bool:
     """날짜 입력"""
@@ -261,7 +250,6 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
         log(f"  ❌ 날짜 설정 실패: {e}")
         return False
 
-
 def click_excel_download(driver) -> bool:
     """EXCEL 다운 버튼 클릭"""
     try:
@@ -288,7 +276,6 @@ def click_excel_download(driver) -> bool:
             raise  # 100건 제한은 상위로 전달
         log(f"  ❌ 다운 버튼 클릭 실패: {e}")
         return False
-
 
 def wait_for_download(timeout: int = 30, baseline_files: set = None) -> Optional[Path]:
     """다운로드 완료 대기 - 개선된 감지 로직"""
@@ -371,7 +358,6 @@ def wait_for_download(timeout: int = 30, baseline_files: set = None) -> Optional
     
     return None
 
-
 def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, month: int) -> Path:
     """다운로드 파일을 목적지로 이동 및 이름 변경"""
     # 폴더 생성
@@ -379,7 +365,7 @@ def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, m
     dest_dir = DOWNLOAD_DIR / folder_name
     dest_dir.mkdir(parents=True, exist_ok=True)
     
-    # 파일명: 아파트 200601.xlsx (YYYYMM 형식)
+    # 파일명: 아파트 200601.xlsx
     filename = f"{property_type} {year:04d}{month:02d}.xlsx"
     dest_path = dest_dir / filename
     
@@ -387,41 +373,20 @@ def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, m
     downloaded_file.rename(dest_path)
     log(f"  📁 저장: {dest_path}")
     
-    return dest_path
-
-
-def upload_to_drive(local_file_path: Path, property_type: str, year: int, month: int) -> bool:
-    """Google Drive에 파일 업로드"""
-    if not DRIVE_UPLOAD_ENABLED:
-        return False
+    # Google Drive 업로드
+    if DRIVE_UPLOAD_ENABLED:
+        try:
+            log(f"  ☁️  Google Drive 업로드 중...")
+            uploader = get_uploader()
+            if uploader.init_service():
+                uploader.upload_file(dest_path, filename, property_type)
+                log(f"  ✅ Google Drive 업로드 완료")
+            else:
+                log(f"  ⚠️  Google Drive 업로드 실패: 서비스 초기화 실패")
+        except Exception as e:
+            log(f"  ⚠️  Google Drive 업로드 실패: {e}")
     
-    try:
-        uploader = get_uploader()
-        if not uploader.init_service():
-            log(f"  ⚠️  Google Drive 업로드 실패: 서비스 초기화 실패")
-            return False
-        
-        # 파일명: 아파트 200601.xlsx (YYYYMM 형식)
-        file_name = f"{property_type} {year:04d}{month:02d}.xlsx"
-        
-        # 파일이 이미 존재하는지 확인
-        if uploader.check_file_exists(file_name, property_type):
-            log(f"  ⏭️  Google Drive에 이미 존재: {file_name}")
-            return True
-        
-        # 업로드
-        file_id = uploader.upload_file(local_file_path, file_name, property_type)
-        
-        if file_id:
-            return True
-        else:
-            log(f"  ⚠️  Google Drive 업로드 실패")
-            return False
-            
-    except Exception as e:
-        log(f"  ⚠️  Google Drive 업로드 중 오류: {e}")
-        return False
-
+    return dest_path
 
 def generate_monthly_dates(start_year: int = 2006, start_month: int = 1) -> List[Tuple[date, date]]:
     """2006년 1월부터 현재까지 월별 (시작일, 종료일) 생성"""
@@ -449,7 +414,6 @@ def generate_monthly_dates(start_year: int = 2006, start_month: int = 1) -> List
     
     return dates
 
-
 def load_progress() -> dict:
     """진행 상황 로드"""
     if PROGRESS_FILE.exists():
@@ -457,37 +421,32 @@ def load_progress() -> dict:
             return json.load(f)
     return {}
 
-
 def save_progress(progress: dict):
     """진행 상황 저장"""
     with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
         json.dump(progress, f, indent=2, ensure_ascii=False)
 
-
 def is_already_downloaded(property_type: str, year: int, month: int) -> bool:
-    """이미 다운로드된 파일인지 확인 (Google Drive 우선, 그 다음 로컬)"""
+    """이미 다운로드된 파일인지 확인"""
     folder_name = sanitize_folder_name(property_type)
     filename = f"{property_type} {year:04d}{month:02d}.xlsx"
+    dest_path = DOWNLOAD_DIR / folder_name / filename
     
-    # Google Drive 확인 (우선)
+    # 로컬 확인
+    if dest_path.exists():
+        return True
+    
+    # Google Drive 확인
     if DRIVE_UPLOAD_ENABLED:
         try:
             uploader = get_uploader()
             if uploader.init_service():
                 if uploader.check_file_exists(filename, property_type):
-                    log(f"  ✅ Google Drive에 이미 존재: {filename}")
                     return True
-        except Exception as e:
-            # Google Drive 확인 실패해도 로컬 확인은 계속 진행
+        except:
             pass
     
-    # 로컬 확인
-    local_path = DOWNLOAD_DIR / folder_name / filename
-    if local_path.exists():
-        return True
-    
     return False
-
 
 def check_if_all_historical_complete(progress: dict) -> bool:
     """모든 과거 데이터가 완료되었는지 확인 (2006-01 ~ 작년 12월)"""
@@ -503,7 +462,6 @@ def check_if_all_historical_complete(progress: dict) -> bool:
             return False
     
     return True
-
 
 def download_single_month_with_retry(driver, property_type: str, start_date: date, end_date: date, max_retries: int = 3) -> bool:
     """단일 월 다운로드 - 재시도 포함"""
@@ -557,13 +515,7 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
         if downloaded:
             # 성공! 이동 및 이름 변경
             try:
-                local_file_path = move_and_rename_file(downloaded, property_type, year, month)
-                
-                # Google Drive 업로드
-                if DRIVE_UPLOAD_ENABLED:
-                    log(f"  ☁️  Google Drive 업로드 중...")
-                    upload_to_drive(local_file_path, property_type, year, month)
-                
+                move_and_rename_file(downloaded, property_type, year, month)
                 return True
             except Exception as e:
                 log(f"  ❌ 파일 이동 실패: {e}")
@@ -583,20 +535,13 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
     
     return False
 
-
 def main():
     """메인 함수"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--test-mode", action="store_true", help="테스트 모드")
     parser.add_argument("--max-months", type=int, default=2, help="테스트 모드에서 최대 다운로드 개월 수")
     parser.add_argument("--update-mode", action="store_true", help="업데이트 모드 (최근 1년만)")
-    parser.add_argument("--skip-drive-upload", action="store_true", help="Google Drive 업로드 건너뛰기")
     args = parser.parse_args()
-    
-    # Google Drive 업로드 설정
-    global DRIVE_UPLOAD_ENABLED
-    if args.skip_drive_upload:
-        DRIVE_UPLOAD_ENABLED = False
     
     log("="*70)
     log("🚀 국토부 실거래가 데이터 다운로드")
@@ -604,10 +549,6 @@ def main():
     log(f"🖥️  실행 환경: {'GitHub Actions (CI)' if IS_CI else '로컬 PC'}")
     log(f"📂 저장 경로: {DOWNLOAD_DIR}")
     log(f"📊 종목 수: {len(PROPERTY_TYPES)}")
-    if DRIVE_UPLOAD_ENABLED:
-        log(f"☁️  Google Drive 업로드: 활성화")
-    else:
-        log(f"☁️  Google Drive 업로드: 비활성화")
     if args.test_mode:
         log(f"🧪 테스트 모드: 최근 {args.max_months}개월")
     log("")
@@ -780,7 +721,5 @@ def main():
         except:
             pass
 
-
 if __name__ == "__main__":
     main()
-
