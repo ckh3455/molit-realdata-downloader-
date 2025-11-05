@@ -431,19 +431,57 @@ def load_progress() -> dict:
             uploader = get_uploader()
             if uploader.init_service():
                 progress = {}
+                today = date.today()
+                
                 for property_type in PROPERTY_TYPES:
                     prop_key = sanitize_folder_name(property_type)
-                    last_month = uploader.get_last_file_month(property_type)
-                    if last_month:
-                        year, month = last_month
-                        month_key = f"{year:04d}{month:02d}"
+                    
+                    # 모든 파일의 년월 확인
+                    all_months = uploader.get_all_file_months(property_type)
+                    
+                    if not all_months:
+                        log(f"  ℹ️  {property_type}: 파일 없음 (처음 시작)")
+                        continue
+                    
+                    # 2006-01부터 현재까지 빠진 파일 찾기
+                    expected_months = set()
+                    current = date(2006, 1, 1)
+                    while current <= today:
+                        expected_months.add((current.year, current.month))
+                        if current.month == 12:
+                            current = date(current.year + 1, 1, 1)
+                        else:
+                            current = date(current.year, current.month + 1, 1)
+                    
+                    missing_months = expected_months - all_months
+                    
+                    if missing_months:
+                        # 빠진 파일이 있으면 가장 오래된 빠진 파일부터 시작
+                        oldest_missing = min(missing_months)
+                        last_year, last_month = oldest_missing
+                        # 가장 오래된 빠진 파일의 이전 달까지 완료된 것으로 표시
+                        if last_month == 1:
+                            completed_year = last_year - 1
+                            completed_month = 12
+                        else:
+                            completed_year = last_year
+                            completed_month = last_month - 1
+                        month_key = f"{completed_year:04d}{completed_month:02d}"
+                        progress[prop_key] = {
+                            "last_month": month_key,
+                            "last_update": datetime.now().isoformat(),
+                            "missing_count": len(missing_months)
+                        }
+                        log(f"  ⚠️  {property_type}: {month_key}까지 완료, {len(missing_months)}개 파일 누락 ({oldest_missing[0]:04d}-{oldest_missing[1]:02d}부터 필요)")
+                    else:
+                        # 모든 파일이 있으면 가장 최근 파일
+                        last_year, last_month = max(all_months)
+                        month_key = f"{last_year:04d}{last_month:02d}"
                         progress[prop_key] = {
                             "last_month": month_key,
                             "last_update": datetime.now().isoformat()
                         }
-                        log(f"  ✅ {property_type}: {month_key}까지 완료")
-                    else:
-                        log(f"  ℹ️  {property_type}: 파일 없음 (처음 시작)")
+                        log(f"  ✅ {property_type}: {month_key}까지 완료 (모든 파일 존재)")
                 
                 if progress:
                     # 로컬에도 저장
@@ -452,6 +490,8 @@ def load_progress() -> dict:
                     return progress
         except Exception as e:
             log(f"⚠️  Google Drive 확인 실패: {e}")
+            import traceback
+            traceback.print_exc()
     
     return {}
 
@@ -616,10 +656,16 @@ def main():
     
     # 모드 결정
     if args.update_mode:
-        # 강제 업데이트 모드
-        update_mode = True
-        log("🔄 강제 업데이트 모드: 최근 1년치만 갱신")
-        properties_to_download = PROPERTY_TYPES  # 모든 섹션 처리
+        # 강제 업데이트 모드이지만, 파일이 없는 섹션이 있으면 전체 다운로드
+        if not properties_to_download:
+            # 모든 섹션이 완료되었으면 업데이트 모드
+            update_mode = True
+            log("🔄 강제 업데이트 모드: 최근 1년치만 갱신")
+            properties_to_download = PROPERTY_TYPES  # 모든 섹션 처리
+        else:
+            # 파일이 없는 섹션이 있으면 전체 다운로드 모드
+            update_mode = False
+            log(f"📥 전체 다운로드 모드: {len(properties_to_download)}개 섹션 (2006-01부터)")
     elif not properties_to_download:
         # 모든 섹션이 완료되었으면 업데이트 모드로 전환
         update_mode = True
