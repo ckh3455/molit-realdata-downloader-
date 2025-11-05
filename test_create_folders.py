@@ -10,10 +10,14 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 # ==================== 설정 ====================
+# 서비스 계정 정보
+# 이메일: naver-crawling-476404@appspot.gserviceaccount.com
+# 프로젝트 ID: naver-crawling-476404
+
 # 서비스 계정 파일 경로 (환경 변수 또는 직접 지정)
 SERVICE_ACCOUNT_FILE = os.getenv(
     "GOOGLE_SERVICE_ACCOUNT_FILE",
-    r"C:\Users\Hello\OneDrive\office work\naver crawling\naver-crawling-476404-fcf4b10bc63e 클라우드 서비스계정.txt"
+    r"D:\OneDrive\office work\naver crawling\naver-crawling-476404-fcf4b10bc63e 클라우드 서비스계정.txt"
 )
 
 # Shared Drive ID
