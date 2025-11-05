@@ -245,7 +245,7 @@ class DriveUploader:
             
             params = {
                 'body': file_metadata,
-                'media': media,
+                'media_body': media,  # media_body가 올바른 파라미터 이름
                 'fields': 'id, name, webViewLink, size',
                 'supportsAllDrives': True,  # Shared Drive 지원 필수
             }
@@ -271,6 +271,56 @@ class DriveUploader:
             return None
         except Exception as e:
             print(f"  ❌ 업로드 중 오류 발생: {e}")
+            return None
+    
+    def get_last_file_month(self, section_folder_name: str) -> Optional[Tuple[int, int]]:
+        """섹션 폴더에서 가장 최근 파일의 년월 찾기 (예: (2024, 12))"""
+        try:
+            # 부모 폴더 경로 확인
+            path_ids = self.get_folder_path_ids()
+            if not path_ids:
+                return None
+            
+            # 섹션별 폴더 찾기
+            section_parent_id = path_ids[PARENT_FOLDER_PATH[-1]]
+            section_folder_id = self.find_folder_by_name(section_folder_name, section_parent_id)
+            
+            if not section_folder_id:
+                return None
+            
+            # 모든 파일 검색 (파일명으로 정렬)
+            query = f"'{section_folder_id}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'"
+            
+            params = {
+                'q': query,
+                'fields': 'files(id, name)',
+                'orderBy': 'name desc',  # 파일명 내림차순
+                'pageSize': 100,  # 최대 100개 파일 확인
+                'supportsAllDrives': True,
+                'includeItemsFromAllDrives': True,
+            }
+            
+            results = self.drive.files().list(**params).execute()
+            items = results.get('files', [])
+            
+            if not items:
+                return None
+            
+            # 파일명에서 년월 추출 (예: "아파트 202412.xlsx" -> 2024, 12)
+            import re
+            for item in items:
+                name = item.get('name', '')
+                # 파일명 형식: "{섹션명} YYYYMM.xlsx"
+                match = re.search(r'(\d{4})(\d{2})\.xlsx', name)
+                if match:
+                    year = int(match.group(1))
+                    month = int(match.group(2))
+                    return (year, month)
+            
+            return None
+            
+        except Exception as e:
+            print(f"  ⚠️  최근 파일 확인 실패: {e}")
             return None
     
     def check_file_exists(self, file_name: str, section_folder_name: str) -> bool:
