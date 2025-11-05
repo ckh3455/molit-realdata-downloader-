@@ -7,7 +7,7 @@ Google Shared Drive 파일 업로드 모듈
 import os
 import json
 from pathlib import Path
-from typing import Optional, Dict, Tuple  # ← Tuple 추가
+from typing import Optional, Dict, Tuple
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -397,3 +397,4 @@ def get_uploader() -> DriveUploader:
         _uploader_instance = DriveUploader()
         _uploader_instance.init_service()
     return _uploader_instance
+
