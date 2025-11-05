@@ -2,8 +2,8 @@ name: Download Real Estate Data
 
 on:
   schedule:
-    # 매일 오전 2시 (KST 기준) 실행
-    - cron: '0 17 * * *'  # UTC 17:00 = KST 02:00
+    # 매일 오전 2시 (한국시간 오전 11시)에 실행
+    - cron: '0 2 * * *'
   workflow_dispatch:  # 수동 실행 가능
 
 jobs:
@@ -11,152 +11,36 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v4
       with:
         python-version: '3.11'
     
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          wget \
-          unzip \
-          gnupg \
-          software-properties-common \
-          apt-transport-https \
-          ca-certificates
-    
-    - name: Install Chrome
-      run: |
-        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-        sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
-        sudo apt-get update
-        sudo apt-get install -y google-chrome-stable
-    
-    - name: Install ChromeDriver
-      run: |
-        CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
-        echo "Chrome version: $CHROME_VERSION"
-        CHROME_MAJOR_VERSION=$(echo $CHROME_VERSION | cut -d. -f1)
-        echo "Chrome major version: $CHROME_MAJOR_VERSION"
-        
-        # Chrome for Testing API 사용
-        CHROMEDRIVER_VERSION=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/Latest-versions-per-milestone.json" | grep -oP "\"$CHROME_MAJOR_VERSION\.\d+\.\d+\.\d+\"" | head -1 | tr -d '"')
-        if [ -z "$CHROMEDRIVER_VERSION" ]; then
-          # 폴백: ChromeDriver 115+ 버전용
-          CHROMEDRIVER_VERSION=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json" | grep -oP '"version":\s*"\K[\d.]+' | head -1)
-        fi
-        
-        echo "ChromeDriver version: $CHROMEDRIVER_VERSION"
-        wget -q "https://storage.googleapis.com/chrome-for-testing-public/${CHROMEDRIVER_VERSION}/linux64/chromedriver-linux64.zip" -O /tmp/chromedriver.zip || \
-        wget -q "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/${CHROMEDRIVER_VERSION}/linux64/chromedriver-linux64.zip" -O /tmp/chromedriver.zip
-        
-        unzip -q /tmp/chromedriver.zip -d /tmp
-        sudo mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver
-        sudo chmod +x /usr/local/bin/chromedriver
-        rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64
-        
-        chromedriver --version
-    
-    - name: Install Python dependencies
+    - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
     
-    - name: Create service account JSON file
-      env:
-        GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+    - name: Install Chrome
       run: |
-        python -c "
-        import json
-        import os
-        import sys
-        
-        # Secret에서 JSON 가져오기
-        json_str = os.environ.get('GCP_SERVICE_ACCOUNT_KEY', '')
-        if not json_str:
-            print('❌ GCP_SERVICE_ACCOUNT_KEY가 비어있습니다', file=sys.stderr)
-            sys.exit(1)
-        
-        # JSON 파싱하여 검증
-        try:
-            json_data = json.loads(json_str)
-            # 파일로 저장
-            with open('service-account.json', 'w', encoding='utf-8') as f:
-                json.dump(json_data, f, indent=2, ensure_ascii=False)
-            print('✅ service-account.json 파일 생성 완료')
-            print(f'   Keys: {list(json_data.keys())[:5]}...')
-        except json.JSONDecodeError as e:
-            print(f'❌ JSON 파싱 오류: {e}', file=sys.stderr)
-            print(f'   첫 100자: {json_str[:100]}', file=sys.stderr)
-            sys.exit(1)
-        "
-        chmod 600 service-account.json
+        sudo apt-get update
+        sudo apt-get install -y google-chrome-stable
     
-    - name: Check existing files in Google Drive
-      env:
-        SERVICE_ACCOUNT_JSON: service-account.json
-        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-      run: |
-        echo "=========================================="
-        echo "🔍 Google Drive 기존 파일 확인 시작"
-        echo "=========================================="
-        python upload_to_gdrive.py --check-existing
-        echo ""
-        echo "=========================================="
-        echo "✅ 기존 파일 확인 완료"
-        echo "=========================================="
-        echo ""
-        echo "=== existing_files.json 내용 ==="
-        cat existing_files.json 2>/dev/null || echo "파일 없음"
-        echo ""
-    
-    - name: Run download script
+    - name: Download Real Estate Data
       env:
         CI: "1"
-        CHROMEDRIVER_BIN: "/usr/local/bin/chromedriver"
-        CHROME_BIN: "/usr/bin/google-chrome"
-        SERVICE_ACCOUNT_JSON: service-account.json
-        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        GOOGLE_SHARED_DRIVE_ID: ${{ secrets.GOOGLE_SHARED_DRIVE_ID }}
       run: |
-        python download_realdata.py --update-mode || echo "⚠️ 다운로드 스크립트 실패"
+        python download_realdata.py --update-mode
     
-    - name: Upload new files to Google Drive
+    - name: Upload progress file
       if: always()
-      env:
-        SERVICE_ACCOUNT_JSON: service-account.json
-        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-        OUTPUT_DIR: "output"
-      run: |
-        python upload_to_gdrive.py --upload || echo "⚠️ Google Drive 업로드 실패"
-    
-    - name: List files for debugging
-      if: always()
-      run: |
-        echo "=== 현재 디렉토리 파일 ==="
-        ls -la || echo "ls 실패"
-        echo ""
-        echo "=== download_progress.json ==="
-        cat download_progress.json 2>/dev/null || echo "파일 없음"
-        echo ""
-        echo "=== existing_files.json ==="
-        cat existing_files.json 2>/dev/null || echo "파일 없음"
-        echo ""
-        echo "=== output 폴더 ==="
-        ls -la output/ 2>/dev/null || echo "output 폴더 없음"
-    
-    - name: Upload progress file as artifact
-      if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v3
       with:
         name: download-progress
-        path: |
-          download_progress.json
-          existing_files.json
-          output/
-        if-no-files-found: warn
-        retention-days: 7
+        path: download_progress.json
+        retention-days: 30
+
