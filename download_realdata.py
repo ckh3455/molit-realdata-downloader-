@@ -465,24 +465,26 @@ def save_progress(progress: dict):
 
 
 def is_already_downloaded(property_type: str, year: int, month: int) -> bool:
-    """이미 다운로드된 파일인지 확인 (로컬 + Google Drive)"""
-    # 로컬 확인
+    """이미 다운로드된 파일인지 확인 (Google Drive 우선, 그 다음 로컬)"""
     folder_name = sanitize_folder_name(property_type)
     filename = f"{property_type} {year:04d}{month:02d}.xlsx"
-    local_path = DOWNLOAD_DIR / folder_name / filename
     
-    if local_path.exists():
-        return True
-    
-    # Google Drive 확인
+    # Google Drive 확인 (우선)
     if DRIVE_UPLOAD_ENABLED:
         try:
             uploader = get_uploader()
             if uploader.init_service():
                 if uploader.check_file_exists(filename, property_type):
+                    log(f"  ✅ Google Drive에 이미 존재: {filename}")
                     return True
-        except:
+        except Exception as e:
+            # Google Drive 확인 실패해도 로컬 확인은 계속 진행
             pass
+    
+    # 로컬 확인
+    local_path = DOWNLOAD_DIR / folder_name / filename
+    if local_path.exists():
+        return True
     
     return False
 
