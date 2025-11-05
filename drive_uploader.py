@@ -323,55 +323,74 @@ class DriveUploader:
         print(f"  ❌ {max_retries}회 시도 모두 실패")
         return None
     
-    def get_last_file_month(self, section_folder_name: str) -> Optional[Tuple[int, int]]:
-        """섹션 폴더에서 가장 최근 파일의 년월 찾기 (예: (2024, 12))"""
+    def get_all_file_months(self, section_folder_name: str) -> set:
+        """섹션 폴더에서 모든 파일의 년월을 set으로 반환 (예: {(2024, 12), (2024, 11), ...})"""
         try:
             # 부모 폴더 경로 확인
             path_ids = self.get_folder_path_ids()
             if not path_ids:
-                return None
+                return set()
             
             # 섹션별 폴더 찾기
             section_parent_id = path_ids[PARENT_FOLDER_PATH[-1]]
             section_folder_id = self.find_folder_by_name(section_folder_name, section_parent_id)
             
             if not section_folder_id:
-                return None
+                return set()
             
-            # 모든 파일 검색 (파일명으로 정렬)
-            query = f"'{section_folder_id}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'"
+            # 모든 파일 검색 (페이지네이션 처리)
+            all_items = []
+            page_token = None
             
-            params = {
-                'q': query,
-                'fields': 'files(id, name)',
-                'orderBy': 'name desc',  # 파일명 내림차순
-                'pageSize': 100,  # 최대 100개 파일 확인
-                'supportsAllDrives': True,
-                'includeItemsFromAllDrives': True,
-            }
+            while True:
+                query = f"'{section_folder_id}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'"
+                
+                params = {
+                    'q': query,
+                    'fields': 'nextPageToken, files(id, name)',
+                    'pageSize': 1000,  # 최대 1000개
+                    'supportsAllDrives': True,
+                    'includeItemsFromAllDrives': True,
+                }
+                
+                if page_token:
+                    params['pageToken'] = page_token
+                
+                results = self.drive.files().list(**params).execute()
+                items = results.get('files', [])
+                all_items.extend(items)
+                
+                page_token = results.get('nextPageToken')
+                if not page_token:
+                    break
             
-            results = self.drive.files().list(**params).execute()
-            items = results.get('files', [])
+            if not all_items:
+                return set()
             
-            if not items:
-                return None
-            
-            # 파일명에서 년월 추출 (예: "아파트 202412.xlsx" -> 2024, 12)
+            # 파일명에서 년월 추출
             import re
-            for item in items:
+            months = set()
+            for item in all_items:
                 name = item.get('name', '')
                 # 파일명 형식: "{섹션명} YYYYMM.xlsx"
                 match = re.search(r'(\d{4})(\d{2})\.xlsx', name)
                 if match:
                     year = int(match.group(1))
                     month = int(match.group(2))
-                    return (year, month)
+                    months.add((year, month))
             
-            return None
+            return months
             
         except Exception as e:
-            print(f"  ⚠️  최근 파일 확인 실패: {e}")
+            print(f"  ⚠️  파일 목록 확인 실패: {e}")
+            return set()
+    
+    def get_last_file_month(self, section_folder_name: str) -> Optional[Tuple[int, int]]:
+        """섹션 폴더에서 가장 최근 파일의 년월 찾기 (예: (2024, 12))"""
+        all_months = self.get_all_file_months(section_folder_name)
+        if not all_months:
             return None
+        return max(all_months)  # 가장 최근 년월 반환
     
     def check_file_exists(self, file_name: str, section_folder_name: str) -> bool:
         """파일이 이미 존재하는지 확인"""
