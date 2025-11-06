@@ -620,19 +620,55 @@ def click_excel_download(driver) -> bool:
             """)
             if result:
                 log(f"  ✅ EXCEL 다운 버튼 클릭 (JavaScript 함수 직접 호출)")
-                # Alert 확인 (짧은 대기)
+                # Alert 확인 및 다운로드 시작 확인
                 alert_shown = False
+                alert_text = None
                 try:
-                    try_accept_alert(driver, 5.0)
+                    alert = Alert(driver)
+                    alert_text = alert.text
+                    log(f"  🔔 Alert: {alert_text}")
+                    
+                    # 100건 제한 감지
+                    if "100건" in alert_text or "100" in alert_text:
+                        alert.accept()
+                        log(f"  ⛔ 일일 다운로드 100건 제한 도달!")
+                        raise Exception("DOWNLOAD_LIMIT_100")
+                    
+                    # 데이터 없음 감지
+                    if "데이터가 존재하지 않습니다" in alert_text or "존재하지 않습니다" in alert_text:
+                        alert.accept()
+                        log(f"  ℹ️  해당 기간에 데이터가 없습니다.")
+                        raise Exception("NO_DATA_AVAILABLE")
+                    
+                    alert.accept()
                     alert_shown = True
                 except Exception as e:
-                    if "DOWNLOAD_LIMIT_100" in str(e):
+                    if str(e) == "DOWNLOAD_LIMIT_100" or str(e) == "NO_DATA_AVAILABLE":
                         raise
-                    if "NO_DATA_AVAILABLE" in str(e):
-                        raise
+                    # Alert가 없으면 다운로드가 시작되었을 수 있음
+                    pass
                 
-                # Alert가 없으면 다운로드가 시작되었을 수 있으므로 즉시 반환
-                # wait_for_download에서 파일 감지 시작
+                # 다운로드 시작 확인 (1초 대기 후 .crdownload 파일이나 새 파일 확인)
+                time.sleep(1.0)
+                download_started = False
+                try:
+                    current_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
+                    # .crdownload 파일 확인
+                    crdownloads = [f for f in current_files if f.suffix == '.crdownload']
+                    if crdownloads:
+                        download_started = True
+                        log(f"  📥 다운로드 시작 확인: .crdownload 파일 발견")
+                    # 새 엑셀 파일 확인
+                    excel_files = [f for f in current_files if f.suffix.lower() in ['.xls', '.xlsx']]
+                    if excel_files:
+                        download_started = True
+                        log(f"  📥 다운로드 시작 확인: 새 엑셀 파일 발견")
+                except:
+                    pass
+                
+                if not download_started and not alert_shown:
+                    log(f"  ⚠️  다운로드 시작 신호가 보이지 않습니다. 계속 대기합니다...")
+                
                 return True
         except Exception as e:
             if "DOWNLOAD_LIMIT_100" in str(e) or "NO_DATA_AVAILABLE" in str(e):
@@ -693,17 +729,46 @@ def click_excel_download(driver) -> bool:
                 """)
                 if clicked:
                     log(f"  ✅ JavaScript로 버튼 찾아서 클릭 완료")
-                    # Alert 확인 (짧은 대기)
+                    # Alert 확인 및 다운로드 시작 확인
                     alert_shown = False
                     try:
-                        try_accept_alert(driver, 5.0)
+                        alert = Alert(driver)
+                        alert_text = alert.text
+                        log(f"  🔔 Alert: {alert_text}")
+                        
+                        if "100건" in alert_text or "100" in alert_text:
+                            alert.accept()
+                            raise Exception("DOWNLOAD_LIMIT_100")
+                        if "데이터가 존재하지 않습니다" in alert_text or "존재하지 않습니다" in alert_text:
+                            alert.accept()
+                            raise Exception("NO_DATA_AVAILABLE")
+                        
+                        alert.accept()
                         alert_shown = True
                     except Exception as e:
-                        if "DOWNLOAD_LIMIT_100" in str(e):
+                        if str(e) == "DOWNLOAD_LIMIT_100" or str(e) == "NO_DATA_AVAILABLE":
                             raise
-                        if "NO_DATA_AVAILABLE" in str(e):
-                            raise
-                    # Alert가 없으면 다운로드가 시작되었을 수 있으므로 즉시 반환
+                        pass
+                    
+                    # 다운로드 시작 확인
+                    time.sleep(1.0)
+                    download_started = False
+                    try:
+                        current_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
+                        crdownloads = [f for f in current_files if f.suffix == '.crdownload']
+                        if crdownloads:
+                            download_started = True
+                            log(f"  📥 다운로드 시작 확인: .crdownload 파일 발견")
+                        excel_files = [f for f in current_files if f.suffix.lower() in ['.xls', '.xlsx']]
+                        if excel_files:
+                            download_started = True
+                            log(f"  📥 다운로드 시작 확인: 새 엑셀 파일 발견")
+                    except:
+                        pass
+                    
+                    if not download_started and not alert_shown:
+                        log(f"  ⚠️  다운로드 시작 신호가 보이지 않습니다. 계속 대기합니다...")
+                    
                     return True
             except Exception as e:
                 if "DOWNLOAD_LIMIT_100" in str(e) or "NO_DATA_AVAILABLE" in str(e):
@@ -754,19 +819,47 @@ def click_excel_download(driver) -> bool:
                 else:
                     raise Exception(f"버튼 클릭 실패: {e}")
         
-        # Alert 확인 (100건 제한 및 데이터 없음 포함) - 짧은 대기
+        # Alert 확인 및 다운로드 시작 확인
         alert_shown = False
         try:
-            try_accept_alert(driver, 5.0)
+            alert = Alert(driver)
+            alert_text = alert.text
+            log(f"  🔔 Alert: {alert_text}")
+            
+            if "100건" in alert_text or "100" in alert_text:
+                alert.accept()
+                raise Exception("DOWNLOAD_LIMIT_100")
+            if "데이터가 존재하지 않습니다" in alert_text or "존재하지 않습니다" in alert_text:
+                alert.accept()
+                raise Exception("NO_DATA_AVAILABLE")
+            
+            alert.accept()
             alert_shown = True
         except Exception as e:
-            if "DOWNLOAD_LIMIT_100" in str(e):
-                raise  # 100건 제한은 상위로 전달
-            if "NO_DATA_AVAILABLE" in str(e):
-                raise  # 데이터 없음은 상위로 전달
+            if str(e) == "DOWNLOAD_LIMIT_100" or str(e) == "NO_DATA_AVAILABLE":
+                raise
+            # Alert가 없으면 다운로드가 시작되었을 수 있음
+            pass
         
-        # Alert가 없으면 다운로드가 시작되었을 수 있으므로 즉시 반환
-        # wait_for_download에서 파일 감지 시작
+        # 다운로드 시작 확인 (1초 대기 후 .crdownload 파일이나 새 파일 확인)
+        time.sleep(1.0)
+        download_started = False
+        try:
+            current_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
+            crdownloads = [f for f in current_files if f.suffix == '.crdownload']
+            if crdownloads:
+                download_started = True
+                log(f"  📥 다운로드 시작 확인: .crdownload 파일 발견")
+            excel_files = [f for f in current_files if f.suffix.lower() in ['.xls', '.xlsx']]
+            if excel_files:
+                download_started = True
+                log(f"  📥 다운로드 시작 확인: 새 엑셀 파일 발견")
+        except:
+            pass
+        
+        if not download_started and not alert_shown:
+            log(f"  ⚠️  다운로드 시작 신호가 보이지 않습니다. 계속 대기합니다...")
+        
         log(f"  ✅ EXCEL 다운 버튼 클릭 완료")
         return True
     except Exception as e:
@@ -797,17 +890,20 @@ def wait_for_download(timeout: int = 30, baseline_files: set = None, expected_ye
     # 다운로드가 시작되면 .crdownload 파일이나 새 파일이 즉시 나타날 수 있음
     
     found_crdownload = False
+    found_any_file = False
     last_check_time = start_time
     last_size = {}
     stable_count = {}  # 파일 크기가 안정된 횟수
+    no_file_warning_shown = False
     
     while time.time() - start_time < timeout:
         elapsed = time.time() - start_time
         elapsed_int = int(elapsed)
         current_time = time.time()
         
-        # 0.2초마다 체크 (더 빠른 감지)
-        if current_time - last_check_time < 0.2:
+        # 처음 5초는 0.1초마다, 그 이후는 0.2초마다 체크
+        check_interval = 0.1 if elapsed < 5.0 else 0.2
+        if current_time - last_check_time < check_interval:
             time.sleep(0.05)
             continue
         last_check_time = current_time
@@ -819,6 +915,7 @@ def wait_for_download(timeout: int = 30, baseline_files: set = None, expected_ye
         crdownloads = [f for f in current_files if f.suffix == '.crdownload']
         if crdownloads:
             found_crdownload = True
+            found_any_file = True
             # 가장 최근 .crdownload 파일
             latest_crdownload = max(crdownloads, key=lambda p: p.stat().st_mtime)
             size = latest_crdownload.stat().st_size
@@ -835,6 +932,7 @@ def wait_for_download(timeout: int = 30, baseline_files: set = None, expected_ye
         ]
         
         if excel_files:
+            found_any_file = True
             # 가장 최근 파일 (mtime 기준) - 우리가 방금 요청한 파일일 가능성이 높음
             latest = max(excel_files, key=lambda p: p.stat().st_mtime)
             size = latest.stat().st_size
@@ -874,10 +972,20 @@ def wait_for_download(timeout: int = 30, baseline_files: set = None, expected_ye
                     if elapsed_int % 2 == 0:
                         log(f"  📝 파일 쓰기 중... ({size:,} bytes, 안정화 대기: {stable_count.get(file_key, 0)}/3)")
         
+        # 다운로드가 시작되지 않았을 때 경고 메시지
+        if not found_any_file and elapsed_int >= 3 and not no_file_warning_shown:
+            log(f"  ⚠️  다운로드가 시작되지 않은 것 같습니다. ({elapsed_int}초 경과)")
+            log(f"     - 다운로드 폴더 확인: {TEMP_DOWNLOAD_DIR.absolute()}")
+            log(f"     - 브라우저의 다운로드 설정을 확인하세요")
+            no_file_warning_shown = True
+        
         # 5초마다 상태 로그
         if elapsed_int > 0 and elapsed_int % 5 == 0:
             if not found_crdownload and not excel_files:
-                log(f"  ⏳ 대기 중... ({elapsed_int}초, 새 파일 없음)")
+                if found_any_file:
+                    log(f"  ⏳ 대기 중... ({elapsed_int}초, 파일 처리 중)")
+                else:
+                    log(f"  ⏳ 대기 중... ({elapsed_int}초, 다운로드 시작 안 됨)")
     
     # 타임아웃
     log(f"  ⏱️  타임아웃 ({timeout}초)")
