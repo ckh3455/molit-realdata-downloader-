@@ -509,7 +509,7 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
         return False
 
 def click_excel_download(driver) -> bool:
-    """EXCEL 다운 버튼 클릭"""
+    """EXCEL 다운 버튼 클릭 - fnExcelDown() 함수 호출"""
     try:
         btn = driver.find_element(
             By.XPATH,
@@ -517,21 +517,33 @@ def click_excel_download(driver) -> bool:
         )
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
         time.sleep(0.3)
-        btn.click()
-        time.sleep(1.0)
         
-        # Alert 확인 (100건 제한 포함)
+        # 버튼 클릭 또는 JavaScript로 fnExcelDown() 직접 호출
         try:
-            try_accept_alert(driver, 3.0)
+            # JavaScript 함수가 있으면 직접 호출
+            driver.execute_script("if (typeof fnExcelDown === 'function') { fnExcelDown(); } else { arguments[0].click(); }", btn)
+        except:
+            btn.click()
+        
+        # Alert 확인 (더 긴 대기 시간 - 서버 응답 대기)
+        time.sleep(2.0)  # 서버 응답 대기
+        
+        # Alert 확인 (100건 제한 및 데이터 없음 포함)
+        try:
+            try_accept_alert(driver, 5.0)  # Alert 대기 시간 증가
         except Exception as e:
             if "DOWNLOAD_LIMIT_100" in str(e):
                 raise  # 100건 제한은 상위로 전달
+            if "NO_DATA_AVAILABLE" in str(e):
+                raise  # 데이터 없음은 상위로 전달
         
-        log(f"  ✅ EXCEL 다운 버튼 클릭")
+        log(f"  ✅ EXCEL 다운 버튼 클릭 (Alert 없음 - 다운로드 시작됨)")
         return True
     except Exception as e:
         if "DOWNLOAD_LIMIT_100" in str(e):
             raise  # 100건 제한은 상위로 전달
+        if "NO_DATA_AVAILABLE" in str(e):
+            raise  # 데이터 없음은 상위로 전달
         log(f"  ❌ 다운 버튼 클릭 실패: {e}")
         return False
 
