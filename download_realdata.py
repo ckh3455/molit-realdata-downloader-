@@ -545,18 +545,24 @@ def click_excel_download(driver) -> bool:
             btn.click()
         
         # Alert 확인 (더 긴 대기 시간 - 서버 응답 대기)
-        time.sleep(2.0)  # 서버 응답 대기
+        time.sleep(3.0)  # 서버 응답 대기 증가
         
         # Alert 확인 (100건 제한 및 데이터 없음 포함)
+        alert_shown = False
         try:
-            try_accept_alert(driver, 5.0)  # Alert 대기 시간 증가
+            try_accept_alert(driver, 8.0)  # Alert 대기 시간 증가
+            alert_shown = True
         except Exception as e:
             if "DOWNLOAD_LIMIT_100" in str(e):
                 raise  # 100건 제한은 상위로 전달
             if "NO_DATA_AVAILABLE" in str(e):
                 raise  # 데이터 없음은 상위로 전달
         
-        log(f"  ✅ EXCEL 다운 버튼 클릭 (Alert 없음 - 다운로드 시작됨)")
+        # Alert가 없으면 다운로드가 시작되었는지 확인하기 위해 조금 더 대기
+        if not alert_shown:
+            time.sleep(2.0)  # 다운로드 시작 확인을 위한 추가 대기
+        
+        log(f"  ✅ EXCEL 다운 버튼 클릭")
         return True
     except Exception as e:
         if "DOWNLOAD_LIMIT_100" in str(e):
@@ -577,6 +583,9 @@ def wait_for_download(timeout: int = 10, baseline_files: set = None) -> Optional
     log(f"  ⏳ 다운로드 대기 중... (최대 {timeout}초)")
     log(f"  📁 감시 폴더: {TEMP_DOWNLOAD_DIR.absolute()}")
     log(f"  📊 기존 파일: {len(baseline_files)}개")
+    
+    # 다운로드 시작 확인을 위한 초기 대기 (서버 응답 시간 고려)
+    time.sleep(2.0)
     
     found_crdownload = False
     last_check_time = start_time
@@ -896,8 +905,8 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                 continue
             return False
         
-        # 다운로드 대기 (10초)
-        downloaded = wait_for_download(timeout=10, baseline_files=baseline_files)
+        # 다운로드 대기 (20초 - 서버 응답 지연 고려)
+        downloaded = wait_for_download(timeout=20, baseline_files=baseline_files)
         
         if downloaded:
             # 성공! 이동 및 이름 변경
