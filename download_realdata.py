@@ -148,6 +148,60 @@ def build_driver():
     driver = webdriver.Chrome(service=service, options=opts)
     return driver
 
+def remove_google_translate_popup(driver):
+    """Google Translate 팝업 강제 제거/숨김"""
+    try:
+        driver.execute_script("""
+            // Google Translate 관련 모든 요소 찾아서 제거 또는 숨김
+            const selectors = [
+                'div[class*="translate"]',
+                'div[id*="translate"]',
+                'iframe[title*="Translate"]',
+                'iframe[src*="translate"]',
+                '.goog-te-banner-frame',
+                '.goog-te-menu-frame',
+                '#google_translate_element',
+                '[class*="goog-te"]',
+                '[id*="goog-te"]'
+            ];
+            
+            selectors.forEach(selector => {
+                try {
+                    const elements = document.querySelectorAll(selector);
+                    elements.forEach(el => {
+                        // iframe인 경우
+                        if (el.tagName === 'IFRAME') {
+                            el.style.display = 'none';
+                            el.style.visibility = 'hidden';
+                            el.style.width = '0';
+                            el.style.height = '0';
+                        } else {
+                            // 일반 요소는 제거
+                            el.remove();
+                        }
+                    });
+                } catch(e) {}
+            });
+            
+            // body에 직접 추가된 Google Translate 요소도 찾기
+            const allDivs = document.querySelectorAll('div');
+            allDivs.forEach(div => {
+                const text = div.textContent || '';
+                const className = div.className || '';
+                const id = div.id || '';
+                if ((text.includes('Google Translate') || 
+                     (text.includes('영어') && text.includes('한국어')) ||
+                     className.includes('translate') ||
+                     id.includes('translate')) && 
+                    div.offsetParent !== null) {
+                    div.style.display = 'none';
+                    div.style.visibility = 'hidden';
+                }
+            });
+        """)
+    except:
+        pass
+
 def try_accept_alert(driver, timeout=3.0) -> bool:
     """Alert 자동 수락 - 100건 제한 및 데이터 없음 감지"""
     end_time = time.time() + timeout
@@ -198,6 +252,9 @@ def select_property_tab(driver, tab_name: str) -> bool:
     # 페이지가 완전히 로드될 때까지 대기
     time.sleep(3)
     try_accept_alert(driver, 2.0)
+    
+    # Google Translate 팝업 제거
+    remove_google_translate_popup(driver)
     
     # 탭 ID 매핑 (실제 페이지 구조 기반)
     TAB_ID_MAPPING = {
@@ -530,20 +587,9 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
 def click_excel_download(driver) -> bool:
     """EXCEL 다운 버튼 클릭 - fnExcelDown() 함수 호출"""
     try:
-        # 언어번역탭이나 다른 팝업 닫기 시도
-        try:
-            # Google Translate 팝업 닫기
-            close_buttons = driver.find_elements(By.CSS_SELECTOR, 
-                "div[class*='translate'], div[id*='translate'], button[aria-label*='Close'], button[aria-label*='닫기']")
-            for close_btn in close_buttons:
-                try:
-                    if close_btn.is_displayed():
-                        driver.execute_script("arguments[0].click();", close_btn)
-                        time.sleep(0.5)
-                except:
-                    pass
-        except:
-            pass
+        # Google Translate 팝업 강제 제거/숨김
+        remove_google_translate_popup(driver)
+        time.sleep(0.5)
         
         # 방법 1: JavaScript 함수 직접 호출 (가장 안전)
         try:
@@ -1097,6 +1143,10 @@ def main():
         driver.get(MOLIT_URL)
         time.sleep(5)  # 로딩 대기 증가
         try_accept_alert(driver, 2.0)
+        
+        # Google Translate 팝업 제거
+        remove_google_translate_popup(driver)
+        
         log(f"✅ 접속 완료: {driver.current_url}\n")
         
         # 페이지 상태 확인
