@@ -68,8 +68,20 @@ SECTION_START_YEAR = {
     "오피스텔": 2006,
     "토지": 2006,
     "상업업무용": 2006,
-    "분양입주권": 2013,  # 2013년부터 데이터 존재
+    "분양입주권": 2013,  # 2013년 9월부터 데이터 존재
     "공장창고등": 2006,
+}
+
+# 섹션별 시작 월 (데이터가 존재하는 시점, 기본값은 1월)
+SECTION_START_MONTH = {
+    "아파트": 1,
+    "연립다세대": 1,
+    "단독다가구": 1,
+    "오피스텔": 1,
+    "토지": 1,
+    "상업업무용": 1,
+    "분양입주권": 9,  # 2013년 9월부터 데이터 존재
+    "공장창고등": 1,
 }
 
 # 실제 페이지의 탭 이름 매핑 (페이지에는 슬래시가 있음)
@@ -725,10 +737,11 @@ def load_progress() -> dict:
                         log(f"  ℹ️  {property_type}: 파일 없음 (처음 시작)")
                         continue
                     
-                    # 섹션별 시작 년도부터 현재까지 빠진 파일 찾기
+                    # 섹션별 시작 년도/월부터 현재까지 빠진 파일 찾기
                     section_start_year = SECTION_START_YEAR.get(property_type, 2006)
+                    section_start_month = SECTION_START_MONTH.get(property_type, 1)
                     expected_months = set()
-                    current = date(section_start_year, 1, 1)
+                    current = date(section_start_year, section_start_month, 1)
                     while current <= today:
                         expected_months.add((current.year, current.month))
                         if current.month == 12:
@@ -1056,10 +1069,11 @@ def main():
                         start_year = last_year
                         start_month = last_month + 1
                 else:
-                    # 파일이 없으면 섹션별 시작 년도부터
+                    # 파일이 없으면 섹션별 시작 년도/월부터
                     section_start_year = SECTION_START_YEAR.get(property_type, 2006)
+                    section_start_month = SECTION_START_MONTH.get(property_type, 1)
                     start_year = section_start_year
-                    start_month = 1
+                    start_month = section_start_month
                 section_monthly_dates = generate_monthly_dates(start_year, start_month)
             
             if last_completed:
