@@ -1241,13 +1241,23 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
     for attempt in range(1, max_retries + 1):
         log(f"  🔄 시도 {attempt}/{max_retries}")
         
-        # 첫 번째 시도가 아니면 페이지 준비 상태 확인
+        # 첫 번째 시도 전 페이지 준비 상태 확인
         if attempt == 1:
-            try:
-                # 날짜 입력 필드가 준비되었는지 확인
-                driver.find_element(By.CSS_SELECTOR, "#srchBgnDe")
-            except:
-                log(f"  ⏳ 페이지 준비 대기 중...")
+            # 날짜 입력 필드가 준비될 때까지 반복 확인
+            date_field_ready = False
+            for wait_attempt in range(3):  # 최대 3번 시도 (총 3초)
+                try:
+                    date_field = driver.find_element(By.CSS_SELECTOR, "#srchBgnDe")
+                    if date_field.is_displayed() and date_field.is_enabled():
+                        date_field_ready = True
+                        break
+                except:
+                    pass
+                if wait_attempt < 2:  # 마지막 시도가 아니면 대기
+                    time.sleep(1.0)
+            
+            if not date_field_ready:
+                log(f"  ⏳ 페이지 준비 대기 중... (날짜 입력 필드 확인 실패)")
                 time.sleep(2.0)
         
         # 날짜 설정
@@ -1526,16 +1536,25 @@ def main():
                             try_accept_alert(driver, 2.0)
                             if select_property_tab(driver, property_type):
                                 tab_selected = True
-                                # 탭 선택 후 페이지가 완전히 준비될 때까지 충분한 대기
-                                time.sleep(3.0)  # 1초 → 3초로 증가
+                                # 탭 선택 후 페이지가 완전히 준비될 때까지 대기
+                                # 날짜 입력 필드가 준비될 때까지 반복 확인
+                                date_field_ready = False
+                                for wait_attempt in range(5):  # 최대 5번 시도 (총 5초)
+                                    try:
+                                        date_field = driver.find_element(By.CSS_SELECTOR, "#srchBgnDe")
+                                        if date_field.is_displayed() and date_field.is_enabled():
+                                            date_field_ready = True
+                                            log(f"  ✅ 페이지 준비 완료 ({wait_attempt + 1}번째 시도)")
+                                            break
+                                    except:
+                                        pass
+                                    time.sleep(1.0)
                                 
-                                # 날짜 입력 필드가 준비되었는지 확인
-                                try:
-                                    driver.find_element(By.CSS_SELECTOR, "#srchBgnDe")
-                                    log(f"  ✅ 페이지 준비 완료")
-                                except:
-                                    log(f"  ⚠️  날짜 입력 필드 확인 실패, 추가 대기...")
-                                    time.sleep(2.0)
+                                if not date_field_ready:
+                                    log(f"  ⚠️  날짜 입력 필드 확인 실패, 계속 진행...")
+                                else:
+                                    # 추가 안정화 대기
+                                    time.sleep(1.0)
                             else:
                                 retry_count += 1
                                 if retry_count < 3:
