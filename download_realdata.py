@@ -837,8 +837,8 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
         # 날짜 설정
         if not set_dates(driver, start_date, end_date):
             if attempt < max_retries:
-                log(f"  ⏳ 15초 대기 후 재시도...")
-                time.sleep(15)
+                log(f"  ⏳ 5초 대기 후 재시도...")
+                time.sleep(5)
                 continue
             return False
         
@@ -859,8 +859,8 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
         try:
             if not click_excel_download(driver):
                 if attempt < max_retries:
-                    log(f"  ⏳ 15초 대기 후 재시도...")
-                    time.sleep(15)
+                    log(f"  ⏳ 5초 대기 후 재시도...")
+                    time.sleep(5)
                     continue
                 return False
         except Exception as e:
@@ -870,8 +870,8 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
             elif "DOWNLOAD_LIMIT_100" in str(e):
                 raise  # 100건 제한은 상위로 전달
             if attempt < max_retries:
-                log(f"  ⏳ 15초 대기 후 재시도...")
-                time.sleep(15)
+                log(f"  ⏳ 5초 대기 후 재시도...")
+                time.sleep(5)
                 continue
             return False
         
@@ -886,15 +886,15 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
             except Exception as e:
                 log(f"  ❌ 파일 이동 실패: {e}")
                 if attempt < max_retries:
-                    log(f"  ⏳ 15초 대기 후 재시도...")
-                    time.sleep(15)
+                    log(f"  ⏳ 5초 대기 후 재시도...")
+                    time.sleep(5)
                     continue
                 return False
         else:
             # 실패
             if attempt < max_retries:
-                log(f"  ⏳ 15초 대기 후 재시도...")
-                time.sleep(15)
+                log(f"  ⏳ 5초 대기 후 재시도...")
+                time.sleep(5)
             else:
                 log(f"  ❌ {max_retries}회 시도 모두 실패")
                 return False
@@ -1087,14 +1087,12 @@ def main():
                     consecutive_fails += 1
                     log(f"⚠️  실패 카운트: {fail_count} (연속: {consecutive_fails})")
                     
-                    # 연속 3회 실패 시 중단 (100회 제한 가능성)
+                    # 연속 3회 실패 시 이 달은 스킵하고 다음 달로 진행
                     if consecutive_fails >= 3:
-                        log(f"\n⛔ 연속 {consecutive_fails}회 실패 - 다운로드 제한 가능성")
+                        log(f"\n⛔ 연속 {consecutive_fails}회 실패 - 이 달({month_key}) 스킵하고 다음 달로 진행")
                         log(f"💾 진행 상황 저장됨: {PROGRESS_FILE}")
-                        log(f"📌 다음 실행시 {month_key}부터 재개됩니다")
-                        log(f"⏰ 100회 제한일 경우 내일 다시 실행하세요")
-                        driver.quit()
-                        return
+                        consecutive_fails = 0  # 다음 달을 위해 카운터 리셋
+                        # 다음 달로 계속 진행 (return 하지 않음)
                 
                 # 다음 요청 전 대기
                 time.sleep(2)
