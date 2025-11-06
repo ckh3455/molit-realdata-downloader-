@@ -607,7 +607,7 @@ def click_excel_download(driver) -> bool:
     try:
         # Google Translate 팝업 강제 제거/숨김
         remove_google_translate_popup(driver)
-        time.sleep(0.5)
+        time.sleep(0.3)
         
         # 방법 1: JavaScript 함수 직접 호출 (가장 안전 - 다른 요소를 건드리지 않음)
         try:
@@ -620,12 +620,10 @@ def click_excel_download(driver) -> bool:
             """)
             if result:
                 log(f"  ✅ EXCEL 다운 버튼 클릭 (JavaScript 함수 직접 호출)")
-                time.sleep(3.0)  # 서버 응답 대기
-                
-                # Alert 확인
+                # Alert 확인 (짧은 대기)
                 alert_shown = False
                 try:
-                    try_accept_alert(driver, 8.0)
+                    try_accept_alert(driver, 5.0)
                     alert_shown = True
                 except Exception as e:
                     if "DOWNLOAD_LIMIT_100" in str(e):
@@ -633,9 +631,8 @@ def click_excel_download(driver) -> bool:
                     if "NO_DATA_AVAILABLE" in str(e):
                         raise
                 
-                if not alert_shown:
-                    time.sleep(3.0)
-                
+                # Alert가 없으면 다운로드가 시작되었을 수 있으므로 즉시 반환
+                # wait_for_download에서 파일 감지 시작
                 return True
         except Exception as e:
             if "DOWNLOAD_LIMIT_100" in str(e) or "NO_DATA_AVAILABLE" in str(e):
@@ -696,19 +693,17 @@ def click_excel_download(driver) -> bool:
                 """)
                 if clicked:
                     log(f"  ✅ JavaScript로 버튼 찾아서 클릭 완료")
-                    time.sleep(3.0)
-                    # Alert 확인
+                    # Alert 확인 (짧은 대기)
                     alert_shown = False
                     try:
-                        try_accept_alert(driver, 8.0)
+                        try_accept_alert(driver, 5.0)
                         alert_shown = True
                     except Exception as e:
                         if "DOWNLOAD_LIMIT_100" in str(e):
                             raise
                         if "NO_DATA_AVAILABLE" in str(e):
                             raise
-                    if not alert_shown:
-                        time.sleep(3.0)
+                    # Alert가 없으면 다운로드가 시작되었을 수 있으므로 즉시 반환
                     return True
             except Exception as e:
                 if "DOWNLOAD_LIMIT_100" in str(e) or "NO_DATA_AVAILABLE" in str(e):
@@ -759,12 +754,10 @@ def click_excel_download(driver) -> bool:
                 else:
                     raise Exception(f"버튼 클릭 실패: {e}")
         
-        time.sleep(3.0)  # 서버 응답 대기
-        
-        # Alert 확인 (100건 제한 및 데이터 없음 포함)
+        # Alert 확인 (100건 제한 및 데이터 없음 포함) - 짧은 대기
         alert_shown = False
         try:
-            try_accept_alert(driver, 8.0)
+            try_accept_alert(driver, 5.0)
             alert_shown = True
         except Exception as e:
             if "DOWNLOAD_LIMIT_100" in str(e):
@@ -772,10 +765,8 @@ def click_excel_download(driver) -> bool:
             if "NO_DATA_AVAILABLE" in str(e):
                 raise  # 데이터 없음은 상위로 전달
         
-        # Alert가 없으면 다운로드가 시작되었는지 확인하기 위해 조금 더 대기
-        if not alert_shown:
-            time.sleep(3.0)  # 다운로드 시작 확인을 위한 추가 대기 (서버 응답 지연 고려)
-        
+        # Alert가 없으면 다운로드가 시작되었을 수 있으므로 즉시 반환
+        # wait_for_download에서 파일 감지 시작
         log(f"  ✅ EXCEL 다운 버튼 클릭 완료")
         return True
     except Exception as e:
@@ -788,8 +779,8 @@ def click_excel_download(driver) -> bool:
         traceback.print_exc()
         return False
 
-def wait_for_download(timeout: int = 10, baseline_files: set = None) -> Optional[Path]:
-    """다운로드 완료 대기 - 개선된 감지 로직"""
+def wait_for_download(timeout: int = 30, baseline_files: set = None, expected_year: int = None, expected_month: int = None) -> Optional[Path]:
+    """다운로드 완료 대기 - 개선된 감지 로직 (즉시 감지 시작)"""
     start_time = time.time()
     
     # baseline이 없으면 현재 파일 목록 사용
@@ -799,34 +790,40 @@ def wait_for_download(timeout: int = 10, baseline_files: set = None) -> Optional
     log(f"  ⏳ 다운로드 대기 중... (최대 {timeout}초)")
     log(f"  📁 감시 폴더: {TEMP_DOWNLOAD_DIR.absolute()}")
     log(f"  📊 기존 파일: {len(baseline_files)}개")
+    if expected_year and expected_month:
+        log(f"  🎯 예상 파일: {expected_year:04d}-{expected_month:02d} 데이터")
     
-    # 다운로드 시작 확인을 위한 초기 대기 (서버 응답 시간 고려)
-    # 서버에서 파일 생성까지 시간이 걸릴 수 있으므로 초기 대기
-    time.sleep(3.0)
+    # 초기 대기 시간 제거 - 즉시 감지 시작
+    # 다운로드가 시작되면 .crdownload 파일이나 새 파일이 즉시 나타날 수 있음
     
     found_crdownload = False
     last_check_time = start_time
+    last_size = {}
+    stable_count = {}  # 파일 크기가 안정된 횟수
     
     while time.time() - start_time < timeout:
-        elapsed = int(time.time() - start_time)
+        elapsed = time.time() - start_time
+        elapsed_int = int(elapsed)
         current_time = time.time()
         
-        # 0.3초마다 체크
-        if current_time - last_check_time < 0.3:
-            time.sleep(0.1)
+        # 0.2초마다 체크 (더 빠른 감지)
+        if current_time - last_check_time < 0.2:
+            time.sleep(0.05)
             continue
         last_check_time = current_time
         
         # 현재 폴더의 모든 파일
         current_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
         
-        # .crdownload 파일 확인
+        # .crdownload 파일 확인 (다운로드 진행 중)
         crdownloads = [f for f in current_files if f.suffix == '.crdownload']
         if crdownloads:
             found_crdownload = True
-            if elapsed % 3 == 0 and elapsed > 0:
-                sizes = [f.stat().st_size for f in crdownloads]
-                log(f"  ⏳ 진행중... ({elapsed}초, {sizes[0]:,} bytes)")
+            # 가장 최근 .crdownload 파일
+            latest_crdownload = max(crdownloads, key=lambda p: p.stat().st_mtime)
+            size = latest_crdownload.stat().st_size
+            if elapsed_int % 2 == 0 and elapsed_int > 0:
+                log(f"  ⏳ 다운로드 진행중... ({elapsed_int}초, {size:,} bytes)")
             continue
         
         # 엑셀 파일 찾기 - 새 파일만
@@ -838,24 +835,49 @@ def wait_for_download(timeout: int = 10, baseline_files: set = None) -> Optional
         ]
         
         if excel_files:
-            # 가장 최근 파일 (mtime 기준)
+            # 가장 최근 파일 (mtime 기준) - 우리가 방금 요청한 파일일 가능성이 높음
             latest = max(excel_files, key=lambda p: p.stat().st_mtime)
             size = latest.stat().st_size
             
             # 파일이 있고 크기가 1KB 이상이면
             if size > 1000:
-                # 크기 안정화 확인 (5초 대기)
-                time.sleep(5)
-                new_size = latest.stat().st_size
+                file_key = str(latest)
                 
-                # 크기가 안정화되면 성공
-                if new_size == size:
-                    log(f"  ✅ 다운로드 완료: {latest.name} ({size:,} bytes)")
-                    return latest
+                # 크기 안정화 확인 (연속으로 3번 같은 크기면 안정화된 것으로 간주)
+                if file_key in last_size:
+                    if last_size[file_key] == size:
+                        stable_count[file_key] = stable_count.get(file_key, 0) + 1
+                    else:
+                        # 크기가 변했으면 카운트 리셋
+                        stable_count[file_key] = 0
+                        last_size[file_key] = size
                 else:
-                    # 아직 쓰는 중
-                    if elapsed % 2 == 0:
-                        log(f"  📝 파일 쓰기 중... ({new_size:,} bytes)")
+                    last_size[file_key] = size
+                    stable_count[file_key] = 0
+                
+                # 크기가 3번 연속 같으면 안정화된 것으로 간주 (약 0.6초)
+                if stable_count.get(file_key, 0) >= 3:
+                    # 파일이 우리가 요청한 파일인지 검증 (생성 시간으로 확인)
+                    file_mtime = latest.stat().st_mtime
+                    time_diff = file_mtime - start_time
+                    
+                    # 파일이 다운로드 시작 후 30초 이내에 생성되었으면 우리가 요청한 파일로 간주
+                    if time_diff >= -5 and time_diff <= 30:
+                        log(f"  ✅ 다운로드 완료: {latest.name} ({size:,} bytes, 생성: {time_diff:.1f}초 전)")
+                        return latest
+                    else:
+                        # 너무 오래된 파일이면 다른 파일일 수 있음
+                        if elapsed_int % 3 == 0:
+                            log(f"  ⚠️  파일 발견했지만 생성 시간이 이상함: {latest.name} (생성: {time_diff:.1f}초 전)")
+                else:
+                    # 아직 크기가 변하는 중
+                    if elapsed_int % 2 == 0:
+                        log(f"  📝 파일 쓰기 중... ({size:,} bytes, 안정화 대기: {stable_count.get(file_key, 0)}/3)")
+        
+        # 5초마다 상태 로그
+        if elapsed_int > 0 and elapsed_int % 5 == 0:
+            if not found_crdownload and not excel_files:
+                log(f"  ⏳ 대기 중... ({elapsed_int}초, 새 파일 없음)")
     
     # 타임아웃
     log(f"  ⏱️  타임아웃 ({timeout}초)")
@@ -867,7 +889,15 @@ def wait_for_download(timeout: int = 10, baseline_files: set = None) -> Optional
     if new_files:
         log(f"  🆕 새 파일 발견: {len(new_files)}개")
         for f in new_files:
-            log(f"     - {f.name} ({f.stat().st_size:,} bytes)")
+            file_mtime = f.stat().st_mtime
+            time_diff = file_mtime - start_time
+            log(f"     - {f.name} ({f.stat().st_size:,} bytes, 생성: {time_diff:.1f}초 전)")
+        
+        # 가장 최근 파일이라도 반환 (검증 실패했지만 파일은 있음)
+        latest = max(new_files, key=lambda p: p.stat().st_mtime)
+        if latest.suffix.lower() in ['.xls', '.xlsx']:
+            log(f"  ⚠️  검증 실패했지만 가장 최근 파일 반환: {latest.name}")
+            return latest
     else:
         log(f"  ⚠️  새 파일 없음 (전체 {len(all_files)}개)")
     
@@ -1126,7 +1156,8 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
             return False
         
         # 다운로드 대기 (30초 - 서버 응답 지연 및 파일 생성 시간 고려)
-        downloaded = wait_for_download(timeout=30, baseline_files=baseline_files)
+        # 다운로드 버튼 클릭 직후이므로 즉시 감지 시작
+        downloaded = wait_for_download(timeout=30, baseline_files=baseline_files, expected_year=year, expected_month=month)
         
         if downloaded:
             # 성공! 이동 및 이름 변경
