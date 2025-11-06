@@ -129,7 +129,7 @@ def build_driver():
     return driver
 
 def try_accept_alert(driver, timeout=3.0) -> bool:
-    """Alert 자동 수락 - 100건 제한 감지"""
+    """Alert 자동 수락 - 100건 제한 및 데이터 없음 감지"""
     end_time = time.time() + timeout
     while time.time() < end_time:
         try:
@@ -145,12 +145,20 @@ def try_accept_alert(driver, timeout=3.0) -> bool:
                 log(f"  ⏰ 내일 다시 실행하면 이어서 진행됩니다.")
                 raise Exception("DOWNLOAD_LIMIT_100")
             
+            # 데이터 없음 감지
+            if "데이터가 존재하지 않습니다" in text or "존재하지 않습니다" in text:
+                alert.accept()
+                log(f"  ℹ️  해당 기간에 데이터가 없습니다.")
+                raise Exception("NO_DATA_AVAILABLE")
+            
             alert.accept()
             time.sleep(0.5)
             return True
         except Exception as e:
             if str(e) == "DOWNLOAD_LIMIT_100":
                 raise  # 100건 제한은 상위로 전달
+            if str(e) == "NO_DATA_AVAILABLE":
+                raise  # 데이터 없음은 상위로 전달
             time.sleep(0.2)
     return False
 
@@ -171,21 +179,111 @@ def select_property_tab(driver, tab_name: str) -> bool:
     time.sleep(3)
     try_accept_alert(driver, 2.0)
     
-    # 방법 1: 다양한 XPath 선택자 시도 (실제 탭 이름 사용)
-    selectors = [
+    # 탭 ID 매핑 (실제 페이지 구조 기반)
+    TAB_ID_MAPPING = {
+        "아파트": "xlsTab1",
+        "연립다세대": "xlsTab2",
+        "단독다가구": "xlsTab3",
+        "오피스텔": "xlsTab4",
+        "분양입주권": "xlsTab5",
+        "상업업무용": "xlsTab6",
+        "토지": "xlsTab7",
+        "공장창고등": "xlsTab8",
+    }
+    
+    # 방법 0: ID로 직접 찾기 (가장 확실한 방법)
+    tab_id = TAB_ID_MAPPING.get(tab_name)
+    if tab_id:
+        try:
+            log(f"  🔍 ID로 탭 찾기: {tab_id}")
+            elem = driver.find_element(By.ID, tab_id)
+            if not elem.is_displayed():
+                log(f"  ⚠️  요소가 보이지 않음, 스크롤 시도...")
+                driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", elem)
+                time.sleep(1)
+            
+            # 클릭 전 상태 확인
+            parent_before = elem.find_element(By.XPATH, "./..")
+            parent_class_before = parent_before.get_attribute("class")
+            log(f"  📊 클릭 전 부모 클래스: {parent_class_before}")
+            
+            # 클릭
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
+            time.sleep(0.5)
+            driver.execute_script("arguments[0].click();", elem)
+            time.sleep(2)
+            try_accept_alert(driver, 2.0)
+            
+            # 클릭 후 활성화 확인
+            parent_after = elem.find_element(By.XPATH, "./..")
+            parent_class_after = parent_after.get_attribute("class")
+            log(f"  📊 클릭 후 부모 클래스: {parent_class_after}")
+            
+            # 활성화 확인 (부모에 'on' 클래스가 있으면 활성화됨)
+            if "on" in parent_class_after:
+                log(f"  ✅ 탭 선택 완료 (ID): {tab_name}")
+                return True
+            else:
+                log(f"  ⚠️  탭 클릭했지만 활성화되지 않음, 재시도...")
+                # 한 번 더 클릭 시도
+                driver.execute_script("arguments[0].click();", elem)
+                time.sleep(2)
+                try_accept_alert(driver, 2.0)
+                parent_after2 = elem.find_element(By.XPATH, "./..")
+                parent_class_after2 = parent_after2.get_attribute("class")
+                if "on" in parent_class_after2:
+                    log(f"  ✅ 탭 선택 완료 (ID, 재시도): {tab_name}")
+                    return True
+                else:
+                    log(f"  ❌ 탭 활성화 실패")
+        except Exception as e:
+            log(f"  ⚠️  ID로 찾기 실패: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # 방법 1: CSS 선택자로 quarter-tab-cover 내부 링크 찾기
+    css_selectors = []
+    if tab_id:
+        css_selectors.append(f"ul.quarter-tab-cover a#{tab_id}")
+    css_selectors.extend([
+        f"ul.quarter-tab-cover a[title*='{tab_name}']",
+        f"ul.quarter-tab-cover a[title*='{actual_tab_name.replace('/', '')}']",
+        f".quarter-tab-cover a.link",
+    ])
+    
+    for idx, selector in enumerate(css_selectors, 1):
+        try:
+            log(f"  🔍 탭 찾기 시도 {idx}/{len(css_selectors)} (CSS: {selector})")
+            elems = driver.find_elements(By.CSS_SELECTOR, selector)
+            for elem in elems:
+                link_text = elem.text.strip()
+                if link_text == actual_tab_name or actual_tab_name in link_text:
+                    if elem.is_displayed():
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
+                        time.sleep(0.5)
+                        driver.execute_script("arguments[0].click();", elem)
+                        time.sleep(2)
+                        try_accept_alert(driver, 2.0)
+                        log(f"  ✅ 탭 선택 완료 (CSS): {tab_name}")
+                        return True
+        except Exception as e:
+            if idx == len(css_selectors):
+                log(f"  ⏭️  CSS 선택자 모두 실패, XPath 시도...")
+            continue
+    
+    # 방법 2: XPath 선택자 시도
+    xpath_selectors = [
         f"//ul[@class='quarter-tab-cover']//a[contains(text(), '{actual_tab_name}')]",
         f"//ul[@class='quarter-tab-cover']//a[normalize-space(text())='{actual_tab_name}']",
+        f"//a[@id='{tab_id}']" if tab_id else None,
         f"//a[contains(text(), '{actual_tab_name}')]",
         f"//a[normalize-space(text())='{actual_tab_name}']",
-        f"//a[text()='{actual_tab_name}']",
-        f"//li//a[contains(text(), '{actual_tab_name}')]",
-        f"//*[@class='tab']//a[contains(text(), '{actual_tab_name}')]",
-        f"//*[contains(@class, 'tab')]//a[contains(text(), '{actual_tab_name}')]",
     ]
+    xpath_selectors = [s for s in xpath_selectors if s is not None]
     
-    for idx, selector in enumerate(selectors, 1):
+    for idx, selector in enumerate(xpath_selectors, 1):
         try:
-            log(f"  🔍 탭 찾기 시도 {idx}/{len(selectors)} (XPath)")
+            log(f"  🔍 탭 찾기 시도 {idx}/{len(xpath_selectors)} (XPath)")
             elem = driver.find_element(By.XPATH, selector)
             
             # 요소가 보이는지 확인
@@ -211,7 +309,7 @@ def select_property_tab(driver, tab_name: str) -> bool:
             return True
             
         except Exception as e:
-            if idx == len(selectors):
+            if idx == len(xpath_selectors):
                 log(f"  ⏭️  XPath 선택자 모두 실패, 다른 방법 시도...")
             else:
                 continue
@@ -732,11 +830,33 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                 continue
             return False
         
+        # 날짜 설정 후 Alert 확인 (데이터 없음 체크)
+        try:
+            try_accept_alert(driver, 2.0)
+        except Exception as e:
+            if "NO_DATA_AVAILABLE" in str(e):
+                log(f"  ⏭️  데이터 없음, 스킵")
+                return True  # 데이터 없음은 정상적인 경우로 처리
+            elif "DOWNLOAD_LIMIT_100" in str(e):
+                raise  # 100건 제한은 상위로 전달
+        
         # 다운로드 클릭 직전 파일 목록 저장
         baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
         
         # 다운로드 클릭
-        if not click_excel_download(driver):
+        try:
+            if not click_excel_download(driver):
+                if attempt < max_retries:
+                    log(f"  ⏳ 15초 대기 후 재시도...")
+                    time.sleep(15)
+                    continue
+                return False
+        except Exception as e:
+            if "NO_DATA_AVAILABLE" in str(e):
+                log(f"  ⏭️  데이터 없음, 스킵")
+                return True  # 데이터 없음은 정상적인 경우로 처리
+            elif "DOWNLOAD_LIMIT_100" in str(e):
+                raise  # 100건 제한은 상위로 전달
             if attempt < max_retries:
                 log(f"  ⏳ 15초 대기 후 재시도...")
                 time.sleep(15)
