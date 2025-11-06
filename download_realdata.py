@@ -110,16 +110,17 @@ def sanitize_folder_name(name: str) -> str:
 def build_driver():
     """크롬 드라이버 생성"""
     opts = Options()
-    # 브라우저 창 강제로 보이기 (디버깅용)
-    # CI 환경에서도 일단 주석 처리하여 브라우저 상태 확인 가능하도록
-    # if IS_CI:
-    #     opts.add_argument("--headless=new")
+    # CI 환경에서는 headless 모드 필수, 로컬에서는 브라우저 창 보이기
+    if IS_CI:
+        opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
-    # 브라우저 창 보이기
-    opts.add_argument("--start-maximized")
-    opts.add_argument("--window-size=1400,900")
+    if not IS_CI:
+        # 로컬 실행 시 창 최대화 (브라우저 창 보이기)
+        opts.add_argument("--start-maximized")
+    else:
+        opts.add_argument("--window-size=1400,900")
     opts.add_argument("--lang=ko-KR")
     
     # 로컬 실행 시 안정성 개선
