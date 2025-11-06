@@ -530,27 +530,92 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
 def click_excel_download(driver) -> bool:
     """EXCEL 다운 버튼 클릭 - fnExcelDown() 함수 호출"""
     try:
-        btn = driver.find_element(
-            By.XPATH,
-            "//button[contains(text(), 'EXCEL 다운')]"
-        )
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-        time.sleep(0.3)
-        
-        # 버튼 클릭 또는 JavaScript로 fnExcelDown() 직접 호출
+        # 언어번역탭이나 다른 팝업 닫기 시도
         try:
-            # JavaScript 함수가 있으면 직접 호출
-            driver.execute_script("if (typeof fnExcelDown === 'function') { fnExcelDown(); } else { arguments[0].click(); }", btn)
+            # Google Translate 팝업 닫기
+            close_buttons = driver.find_elements(By.CSS_SELECTOR, 
+                "div[class*='translate'], div[id*='translate'], button[aria-label*='Close'], button[aria-label*='닫기']")
+            for close_btn in close_buttons:
+                try:
+                    if close_btn.is_displayed():
+                        driver.execute_script("arguments[0].click();", close_btn)
+                        time.sleep(0.5)
+                except:
+                    pass
         except:
-            btn.click()
+            pass
         
-        # Alert 확인 (더 긴 대기 시간 - 서버 응답 대기)
-        time.sleep(3.0)  # 서버 응답 대기 증가
+        # 방법 1: JavaScript 함수 직접 호출 (가장 안전)
+        try:
+            result = driver.execute_script("""
+                if (typeof fnExcelDown === 'function') {
+                    fnExcelDown();
+                    return true;
+                }
+                return false;
+            """)
+            if result:
+                log(f"  ✅ EXCEL 다운 버튼 클릭 (JavaScript 함수 직접 호출)")
+                time.sleep(3.0)  # 서버 응답 대기
+                
+                # Alert 확인
+                alert_shown = False
+                try:
+                    try_accept_alert(driver, 8.0)
+                    alert_shown = True
+                except Exception as e:
+                    if "DOWNLOAD_LIMIT_100" in str(e):
+                        raise
+                    if "NO_DATA_AVAILABLE" in str(e):
+                        raise
+                
+                if not alert_shown:
+                    time.sleep(3.0)
+                
+                return True
+        except Exception as e:
+            if "DOWNLOAD_LIMIT_100" in str(e) or "NO_DATA_AVAILABLE" in str(e):
+                raise
+            log(f"  ⚠️  JavaScript 함수 호출 실패, 버튼 클릭으로 시도: {e}")
+        
+        # 방법 2: 버튼을 찾아서 클릭 (더 정확한 선택자 사용)
+        btn = None
+        selectors = [
+            "//button[contains(@onclick, 'fnExcelDown')]",
+            "//button[contains(@onclick, 'Excel')]",
+            "//button[normalize-space(text())='EXCEL 다운']",
+            "//button[contains(text(), 'EXCEL 다운')]",
+            "button.btn-excel, button[class*='excel'], button[class*='download']"
+        ]
+        
+        for selector in selectors:
+            try:
+                if selector.startswith("//"):
+                    btn = driver.find_element(By.XPATH, selector)
+                else:
+                    btn = driver.find_element(By.CSS_SELECTOR, selector)
+                if btn and btn.is_displayed():
+                    break
+            except:
+                continue
+        
+        if not btn:
+            raise Exception("EXCEL 다운 버튼을 찾을 수 없습니다")
+        
+        # 버튼이 보이는지 확인하고, 필요시만 스크롤 (최소한으로)
+        if not btn.is_displayed():
+            # 스크롤 대신 JavaScript로 직접 클릭
+            driver.execute_script("arguments[0].click();", btn)
+        else:
+            # 버튼이 이미 보이면 스크롤 없이 직접 클릭
+            driver.execute_script("arguments[0].click();", btn)
+        
+        time.sleep(3.0)  # 서버 응답 대기
         
         # Alert 확인 (100건 제한 및 데이터 없음 포함)
         alert_shown = False
         try:
-            try_accept_alert(driver, 8.0)  # Alert 대기 시간 증가
+            try_accept_alert(driver, 8.0)
             alert_shown = True
         except Exception as e:
             if "DOWNLOAD_LIMIT_100" in str(e):
@@ -560,7 +625,7 @@ def click_excel_download(driver) -> bool:
         
         # Alert가 없으면 다운로드가 시작되었는지 확인하기 위해 조금 더 대기
         if not alert_shown:
-            time.sleep(2.0)  # 다운로드 시작 확인을 위한 추가 대기
+            time.sleep(3.0)  # 다운로드 시작 확인을 위한 추가 대기 (서버 응답 지연 고려)
         
         log(f"  ✅ EXCEL 다운 버튼 클릭")
         return True
@@ -585,7 +650,8 @@ def wait_for_download(timeout: int = 10, baseline_files: set = None) -> Optional
     log(f"  📊 기존 파일: {len(baseline_files)}개")
     
     # 다운로드 시작 확인을 위한 초기 대기 (서버 응답 시간 고려)
-    time.sleep(2.0)
+    # 서버에서 파일 생성까지 시간이 걸릴 수 있으므로 초기 대기
+    time.sleep(3.0)
     
     found_crdownload = False
     last_check_time = start_time
@@ -905,8 +971,8 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                 continue
             return False
         
-        # 다운로드 대기 (20초 - 서버 응답 지연 고려)
-        downloaded = wait_for_download(timeout=20, baseline_files=baseline_files)
+        # 다운로드 대기 (30초 - 서버 응답 지연 및 파일 생성 시간 고려)
+        downloaded = wait_for_download(timeout=30, baseline_files=baseline_files)
         
         if downloaded:
             # 성공! 이동 및 이름 변경
@@ -1126,8 +1192,8 @@ def main():
                         consecutive_fails = 0  # 다음 달을 위해 카운터 리셋
                         # 다음 달로 계속 진행 (return 하지 않음)
                 
-                # 다음 요청 전 대기
-                time.sleep(2)
+                # 다음 요청 전 대기 (서버 부하 방지 및 요청 간격 확보)
+                time.sleep(5)
             
             log(f"\n✅ {property_type} 완료")
             log(f"   성공: {success_count}, 실패: {fail_count}, 스킵: {skipped_count}")
@@ -1171,3 +1237,4 @@ def main():
 
 if __name__ == "__main__":
     main()
++
