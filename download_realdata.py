@@ -10,6 +10,8 @@ import sys
 import io
 import json
 import time
+import argparse
+import warnings
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
@@ -23,6 +25,9 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.utils import get_column_letter
+
+# openpyxl 경고 억제
+warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 # Google Drive 업로드 모듈
 try:
@@ -588,8 +593,16 @@ def move_and_upload_file(downloaded_file: Path, property_type: str, year: int, m
 
 def main():
     """메인 함수"""
+    # 명령줄 인자 파싱
+    parser = argparse.ArgumentParser(description='최근 3개월치 부동산 실거래 데이터 다운로드 및 전처리')
+    parser.add_argument('--update-mode', action='store_true', 
+                       help='업데이트 모드 (최근 3개월치만 다운로드)')
+    args = parser.parse_args()
+    
     log("="*70)
     log("최근 3개월치 데이터 다운로드 및 전처리 시작")
+    if args.update_mode:
+        log("모드: --update-mode (최근 3개월치만 다운로드)")
     if IS_CI:
         log("환경: GitHub Actions (CI)")
     else:
