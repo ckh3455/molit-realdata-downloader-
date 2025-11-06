@@ -110,21 +110,26 @@ def sanitize_folder_name(name: str) -> str:
 def build_driver():
     """크롬 드라이버 생성"""
     opts = Options()
-    # CI 환경에서는 headless 모드 필수, 로컬에서는 브라우저 창 보이기
-    if IS_CI:
+    # CI 환경 확인 (더 확실하게)
+    is_ci_env = os.getenv("CI") == "1" or os.getenv("GITHUB_ACTIONS") == "true"
+    
+    # CI 환경이 아니면 무조건 브라우저 창 보이기
+    if is_ci_env:
+        # CI 환경 (GitHub Actions 등) - headless 필수
         opts.add_argument("--headless=new")
+        opts.add_argument("--window-size=1400,900")
+    else:
+        # 로컬 환경 - 브라우저 창 무조건 보이기
+        # headless 옵션 절대 사용 안 함
+        opts.add_argument("--start-maximized")
+    
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
-    if not IS_CI:
-        # 로컬 실행 시 창 최대화 (브라우저 창 보이기)
-        opts.add_argument("--start-maximized")
-    else:
-        opts.add_argument("--window-size=1400,900")
     opts.add_argument("--lang=ko-KR")
     
     # 로컬 실행 시 안정성 개선
-    if not IS_CI:
+    if not is_ci_env:
         opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option('useAutomationExtension', False)
@@ -610,12 +615,32 @@ def click_excel_download(driver, baseline_files: set = None) -> bool:
         remove_google_translate_popup(driver)
         time.sleep(0.3)
         
+        # EXCEL 다운 버튼이 준비되었는지 확인
+        try:
+            btn = driver.find_element(By.XPATH, "//button[contains(text(), 'EXCEL 다운')]")
+            if not btn.is_displayed() or not btn.is_enabled():
+                log(f"  ⏳ 버튼 준비 대기 중...")
+                time.sleep(1.0)
+        except:
+            log(f"  ⏳ 버튼 찾기 대기 중...")
+            time.sleep(1.0)
+        
         # baseline_files가 없으면 현재 파일 목록 사용
         if baseline_files is None:
             baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
         
         # 방법 1: JavaScript 함수 직접 호출 (가장 안전 - 다른 요소를 건드리지 않음)
         try:
+            # fnExcelDown 함수가 준비되었는지 확인
+            fn_ready = driver.execute_script("return typeof fnExcelDown === 'function';")
+            if not fn_ready:
+                log(f"  ⏳ fnExcelDown 함수 준비 대기 중...")
+                time.sleep(2.0)
+                # 다시 확인
+                fn_ready = driver.execute_script("return typeof fnExcelDown === 'function';")
+                if not fn_ready:
+                    log(f"  ⚠️  fnExcelDown 함수를 찾을 수 없습니다")
+            
             result = driver.execute_script("""
                 if (typeof fnExcelDown === 'function') {
                     fnExcelDown();
@@ -877,7 +902,7 @@ def click_excel_download(driver, baseline_files: set = None) -> bool:
         traceback.print_exc()
         return False
 
-def wait_for_download(timeout: int = 30, baseline_files: set = None, expected_year: int = None, expected_month: int = None) -> Optional[Path]:
+def wait_for_download(timeout: int = 15, baseline_files: set = None, expected_year: int = None, expected_month: int = None) -> Optional[Path]:
     """다운로드 완료 대기 - 개선된 감지 로직 (즉시 감지 시작)"""
     start_time = time.time()
     
@@ -977,20 +1002,12 @@ def wait_for_download(timeout: int = 30, baseline_files: set = None, expected_ye
                     if elapsed_int % 2 == 0:
                         log(f"  📝 파일 쓰기 중... ({size:,} bytes, 안정화 대기: {stable_count.get(file_key, 0)}/3)")
         
-        # 다운로드가 시작되지 않았을 때 경고 메시지
+        # 다운로드가 시작되지 않았을 때 경고 메시지 (한 번만)
         if not found_any_file and elapsed_int >= 3 and not no_file_warning_shown:
             log(f"  ⚠️  다운로드가 시작되지 않은 것 같습니다. ({elapsed_int}초 경과)")
             log(f"     - 다운로드 폴더 확인: {TEMP_DOWNLOAD_DIR.absolute()}")
             log(f"     - 브라우저의 다운로드 설정을 확인하세요")
             no_file_warning_shown = True
-        
-        # 5초마다 상태 로그
-        if elapsed_int > 0 and elapsed_int % 5 == 0:
-            if not found_crdownload and not excel_files:
-                if found_any_file:
-                    log(f"  ⏳ 대기 중... ({elapsed_int}초, 파일 처리 중)")
-                else:
-                    log(f"  ⏳ 대기 중... ({elapsed_int}초, 다운로드 시작 안 됨)")
     
     # 타임아웃
     log(f"  ⏱️  타임아웃 ({timeout}초)")
@@ -1224,6 +1241,15 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
     for attempt in range(1, max_retries + 1):
         log(f"  🔄 시도 {attempt}/{max_retries}")
         
+        # 첫 번째 시도가 아니면 페이지 준비 상태 확인
+        if attempt == 1:
+            try:
+                # 날짜 입력 필드가 준비되었는지 확인
+                driver.find_element(By.CSS_SELECTOR, "#srchBgnDe")
+            except:
+                log(f"  ⏳ 페이지 준비 대기 중...")
+                time.sleep(2.0)
+        
         # 날짜 설정
         if not set_dates(driver, start_date, end_date):
             if attempt < max_retries:
@@ -1242,8 +1268,11 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
             elif "DOWNLOAD_LIMIT_100" in str(e):
                 raise  # 100건 제한은 상위로 전달
         
-        # 날짜 설정 후 페이지 반영 대기
-        time.sleep(2.0)
+        # 날짜 설정 후 페이지 반영 대기 (첫 번째 시도에서는 더 길게)
+        if attempt == 1:
+            time.sleep(3.0)  # 첫 번째 시도: 3초 대기
+        else:
+            time.sleep(2.0)  # 재시도: 2초 대기
         
         # 다운로드 클릭 직전 파일 목록 저장
         baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
@@ -1268,9 +1297,9 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                 continue
             return False
         
-        # 다운로드 대기 (30초 - 서버 응답 지연 및 파일 생성 시간 고려)
+        # 다운로드 대기 (15초 - 서버 응답 지연 및 파일 생성 시간 고려)
         # 다운로드 버튼 클릭 직후이므로 즉시 감지 시작
-        downloaded = wait_for_download(timeout=30, baseline_files=baseline_files, expected_year=year, expected_month=month)
+        downloaded = wait_for_download(timeout=15, baseline_files=baseline_files, expected_year=year, expected_month=month)
         
         if downloaded:
             # 성공! 이동 및 이름 변경
@@ -1487,16 +1516,38 @@ def main():
                 
                 # 두 번째 다운로드부터는 페이지를 재로드하고 탭을 다시 선택 (안정성 향상)
                 if month_idx > 1:
-                    try:
-                        log(f"  🔄 페이지 재로딩 및 탭 재선택...")
-                        driver.get(MOLIT_URL)
-                        time.sleep(3)
-                        try_accept_alert(driver, 2.0)
-                        if not select_property_tab(driver, property_type):
-                            log(f"  ⚠️  탭 재선택 실패, 계속 진행...")
-                        time.sleep(1.0)
-                    except Exception as e:
-                        log(f"  ⚠️  페이지 재설정 실패, 계속 진행: {e}")
+                    retry_count = 0
+                    tab_selected = False
+                    while retry_count < 3 and not tab_selected:
+                        try:
+                            log(f"  🔄 페이지 재로딩 및 탭 재선택... (시도 {retry_count + 1}/3)")
+                            driver.get(MOLIT_URL)
+                            time.sleep(3)
+                            try_accept_alert(driver, 2.0)
+                            if select_property_tab(driver, property_type):
+                                tab_selected = True
+                                # 탭 선택 후 페이지가 완전히 준비될 때까지 충분한 대기
+                                time.sleep(3.0)  # 1초 → 3초로 증가
+                                
+                                # 날짜 입력 필드가 준비되었는지 확인
+                                try:
+                                    driver.find_element(By.CSS_SELECTOR, "#srchBgnDe")
+                                    log(f"  ✅ 페이지 준비 완료")
+                                except:
+                                    log(f"  ⚠️  날짜 입력 필드 확인 실패, 추가 대기...")
+                                    time.sleep(2.0)
+                            else:
+                                retry_count += 1
+                                if retry_count < 3:
+                                    time.sleep(2)
+                        except Exception as e:
+                            log(f"  ⚠️  페이지 재설정 실패: {e}")
+                            retry_count += 1
+                            if retry_count < 3:
+                                time.sleep(2)
+                    
+                    if not tab_selected:
+                        log(f"  ❌ 탭 재선택 실패, 다운로드 시도 계속...")
                 
                 # 다운로드 시도 (최대 3회 재시도)
                 success = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3)
