@@ -240,15 +240,15 @@ def select_property_tab(driver, tab_name: str) -> bool:
             try:
                 link_text = link.text.strip()
                 # 정확히 일치하거나, 부분 일치, 또는 공백 제거 후 일치
-                normalized_link = link_text.replace(" ", "").replace("\n", "").replace("\t", "")
-                normalized_tab = actual_tab_name.replace(" ", "").replace("\n", "").replace("\t", "")
+                normalized_link = link_text.replace(" ", "").replace("\n", "").replace("\t", "").replace("/", "")
+                normalized_tab = actual_tab_name.replace(" ", "").replace("\n", "").replace("\t", "").replace("/", "")
                 
-                if (actual_tab_name in link_text or 
-                    link_text == actual_tab_name or 
-                    normalized_tab in normalized_link or
+                # 실제 탭 이름을 우선적으로 매칭 (정확도 높음)
+                if (link_text == actual_tab_name or 
                     normalized_link == normalized_tab or
-                    tab_name in link_text):  # 원본 이름도 시도
-                    log(f"  ✅ 링크 발견: '{link_text}' (원본: '{tab_name}')")
+                    actual_tab_name in link_text or
+                    normalized_tab in normalized_link):
+                    log(f"  ✅ 링크 발견: '{link_text}' (매핑: '{tab_name}' → '{actual_tab_name}')")
                     
                     # 요소가 보이는지 확인
                     if not link.is_displayed():
@@ -278,15 +278,15 @@ def select_property_tab(driver, tab_name: str) -> bool:
             for link in all_links[20:]:
                 try:
                     link_text = link.text.strip()
-                    normalized_link = link_text.replace(" ", "").replace("\n", "").replace("\t", "")
-                    normalized_tab = actual_tab_name.replace(" ", "").replace("\n", "").replace("\t", "")
+                    normalized_link = link_text.replace(" ", "").replace("\n", "").replace("\t", "").replace("/", "")
+                    normalized_tab = actual_tab_name.replace(" ", "").replace("\n", "").replace("\t", "").replace("/", "")
                     
-                    if (actual_tab_name in link_text or 
-                        link_text == actual_tab_name or 
-                        normalized_tab in normalized_link or
+                    # 실제 탭 이름을 우선적으로 매칭 (정확도 높음)
+                    if (link_text == actual_tab_name or 
                         normalized_link == normalized_tab or
-                        tab_name in link_text):  # 원본 이름도 시도
-                        log(f"  ✅ 링크 발견: '{link_text}' (원본: '{tab_name}')")
+                        actual_tab_name in link_text or
+                        normalized_tab in normalized_link):
+                        log(f"  ✅ 링크 발견: '{link_text}' (매핑: '{tab_name}' → '{actual_tab_name}')")
                         
                         if not link.is_displayed():
                             driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", link)
@@ -323,9 +323,11 @@ def select_property_tab(driver, tab_name: str) -> bool:
         script = f"""
         var links = document.querySelectorAll('a');
         var targetTab = '{actual_tab_name}';
+        var normalizedTarget = targetTab.replace(/[\\s\\/]/g, '');
         for (var i = 0; i < links.length; i++) {{
             var text = links[i].textContent.trim();
-            if (text === targetTab || text.includes(targetTab) || text === '{tab_name}' || text.includes('{tab_name}')) {{
+            var normalizedText = text.replace(/[\\s\\/]/g, '');
+            if (text === targetTab || normalizedText === normalizedTarget || text.includes(targetTab)) {{
                 links[i].scrollIntoView({{block: 'center'}});
                 links[i].click();
                 return true;
