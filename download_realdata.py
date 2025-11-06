@@ -21,7 +21,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.alert import Alert
-from selenium.common.exceptions import UnexpectedAlertPresentException
+from selenium.common.exceptions import UnexpectedAlertPresentException, StaleElementReferenceException
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
@@ -724,65 +724,122 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
         return False
 
 def click_excel_download(driver, baseline_files: set = None) -> bool:
-    """EXCEL 다운 버튼 클릭 - fnExcelDown() 함수 호출"""
+    """EXCEL 다운 버튼 클릭 - fnExcelDown() 함수 호출 (창 변화 대응)"""
     try:
         # Google Translate 팝업 강제 제거/숨김
         remove_google_translate_popup(driver)
-        time.sleep(0.3)
-        
-        # EXCEL 다운 버튼이 준비되었는지 확인
-        try:
-            btn = driver.find_element(By.XPATH, "//button[contains(text(), 'EXCEL 다운')]")
-            if not btn.is_displayed() or not btn.is_enabled():
-                log(f"  ⏳ 버튼 준비 대기 중...")
-                time.sleep(1.0)
-        except:
-            log(f"  ⏳ 버튼 찾기 대기 중...")
-            time.sleep(1.0)
         
         # baseline_files가 없으면 현재 파일 목록 사용
         if baseline_files is None:
             baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
         
-        # 방법 1: JavaScript 함수 직접 호출 (가장 안전 - 다른 요소를 건드리지 않음)
+        # 방법 1: JavaScript 함수 직접 호출 (가장 안전 - 창 변화에 영향 없음)
         try:
-            # fnExcelDown 함수가 준비되었는지 확인
-            fn_ready = driver.execute_script("return typeof fnExcelDown === 'function';")
-            if not fn_ready:
-                log(f"  ⏳ fnExcelDown 함수 준비 대기 중...")
-                time.sleep(2.0)
-                # 다시 확인
+            # fnExcelDown 함수가 준비되었는지 확인 (최대 3초 대기)
+            fn_ready = False
+            for wait_attempt in range(6):  # 0.5초씩 6번 = 최대 3초
                 fn_ready = driver.execute_script("return typeof fnExcelDown === 'function';")
-                if not fn_ready:
-                    log(f"  ⚠️  fnExcelDown 함수를 찾을 수 없습니다")
+                if fn_ready:
+                    break
+                if wait_attempt < 5:
+                    time.sleep(0.5)
             
-            result = driver.execute_script("""
-                if (typeof fnExcelDown === 'function') {
-                    fnExcelDown();
-                    return true;
+            if fn_ready:
+                # 함수 호출과 Alert 처리, 다운로드 확인을 하나의 스크립트로 실행
+                result = driver.execute_script("""
+                    try {
+                        if (typeof fnExcelDown === 'function') {
+                            fnExcelDown();
+                            return {success: true, method: 'fnExcelDown'};
+                        }
+                        return {success: false, error: 'fnExcelDown not found'};
+                    } catch(e) {
+                        return {success: false, error: e.toString()};
+                    }
+                """)
+                
+                if result and result.get('success'):
+                    log(f"  ✅ EXCEL 다운 버튼 클릭 (JavaScript 함수 직접 호출)")
+                    # Alert 확인 (즉시)
+                    alert_shown = False
+                    try:
+                        alert = Alert(driver)
+                        alert_text = alert.text
+                        log(f"  🔔 Alert: {alert_text}")
+                        
+                        if "100건" in alert_text or "100" in alert_text:
+                            alert.accept()
+                            log(f"  ⛔ 일일 다운로드 100건 제한 도달!")
+                            raise Exception("DOWNLOAD_LIMIT_100")
+                        
+                        if "데이터가 존재하지 않습니다" in alert_text or "존재하지 않습니다" in alert_text:
+                            alert.accept()
+                            log(f"  ℹ️  해당 기간에 데이터가 없습니다.")
+                            raise Exception("NO_DATA_AVAILABLE")
+                        
+                        alert.accept()
+                        alert_shown = True
+                    except Exception as e:
+                        if str(e) == "DOWNLOAD_LIMIT_100" or str(e) == "NO_DATA_AVAILABLE":
+                            raise
+                        # Alert가 없으면 다운로드가 시작되었을 수 있음
+                        pass
+                    
+                    return True
+            else:
+                log(f"  ⚠️  fnExcelDown 함수를 찾을 수 없습니다")
+        except Exception as e:
+            if "DOWNLOAD_LIMIT_100" in str(e) or "NO_DATA_AVAILABLE" in str(e):
+                raise
+            log(f"  ⚠️  JavaScript 함수 호출 실패, 버튼 클릭으로 시도: {e}")
+        
+        # 방법 2: JavaScript로 버튼을 찾아서 즉시 클릭 (원자적 작업)
+        try:
+            clicked = driver.execute_script("""
+                // 버튼을 찾고 즉시 클릭 (창이 변하기 전에)
+                var buttons = document.querySelectorAll('button.ifdata-search-result');
+                for (var i = 0; i < buttons.length; i++) {
+                    var btn = buttons[i];
+                    if (btn.textContent.trim() === 'EXCEL 다운' && btn.offsetParent !== null) {
+                        // 스크롤과 클릭을 한 번에
+                        btn.scrollIntoView({block: 'center', behavior: 'instant'});
+                        btn.click();
+                        return true;
+                    }
+                }
+                // CSS 선택자로 못 찾으면 XPath 시도
+                var xpathButtons = document.evaluate(
+                    "//button[contains(text(), 'EXCEL 다운')]",
+                    document,
+                    null,
+                    XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+                    null
+                );
+                for (var i = 0; i < xpathButtons.snapshotLength; i++) {
+                    var btn = xpathButtons.snapshotItem(i);
+                    if (btn.offsetParent !== null) {
+                        btn.scrollIntoView({block: 'center', behavior: 'instant'});
+                        btn.click();
+                        return true;
+                    }
                 }
                 return false;
             """)
-            if result:
-                log(f"  ✅ EXCEL 다운 버튼 클릭 (JavaScript 함수 직접 호출)")
-                # Alert 확인 및 다운로드 시작 확인
+            
+            if clicked:
+                log(f"  ✅ JavaScript로 버튼 찾아서 클릭 완료")
+                # Alert 확인 (즉시)
                 alert_shown = False
-                alert_text = None
                 try:
                     alert = Alert(driver)
                     alert_text = alert.text
                     log(f"  🔔 Alert: {alert_text}")
                     
-                    # 100건 제한 감지
                     if "100건" in alert_text or "100" in alert_text:
                         alert.accept()
-                        log(f"  ⛔ 일일 다운로드 100건 제한 도달!")
                         raise Exception("DOWNLOAD_LIMIT_100")
-                    
-                    # 데이터 없음 감지
                     if "데이터가 존재하지 않습니다" in alert_text or "존재하지 않습니다" in alert_text:
                         alert.accept()
-                        log(f"  ℹ️  해당 기간에 데이터가 없습니다.")
                         raise Exception("NO_DATA_AVAILABLE")
                     
                     alert.accept()
@@ -790,91 +847,34 @@ def click_excel_download(driver, baseline_files: set = None) -> bool:
                 except Exception as e:
                     if str(e) == "DOWNLOAD_LIMIT_100" or str(e) == "NO_DATA_AVAILABLE":
                         raise
-                    # Alert가 없으면 다운로드가 시작되었을 수 있음
                     pass
-                
-                # 다운로드 시작 확인 (1초 대기 후 .crdownload 파일이나 새 파일 확인)
-                time.sleep(1.0)
-                download_started = False
-                try:
-                    current_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
-                    # .crdownload 파일 확인 (baseline 제외)
-                    crdownloads = [f for f in current_files if f.suffix == '.crdownload' and f not in baseline_files]
-                    if crdownloads:
-                        download_started = True
-                        log(f"  📥 다운로드 시작 확인: .crdownload 파일 발견")
-                    # 새 엑셀 파일 확인 (baseline 제외)
-                    excel_files = [f for f in current_files if f.suffix.lower() in ['.xls', '.xlsx'] and f not in baseline_files]
-                    if excel_files:
-                        download_started = True
-                        log(f"  📥 다운로드 시작 확인: 새 엑셀 파일 발견")
-                except:
-                    pass
-                
-                if not download_started and not alert_shown:
-                    log(f"  ⚠️  다운로드 시작 신호가 보이지 않습니다. 계속 대기합니다...")
                 
                 return True
         except Exception as e:
             if "DOWNLOAD_LIMIT_100" in str(e) or "NO_DATA_AVAILABLE" in str(e):
                 raise
-            log(f"  ⚠️  JavaScript 함수 호출 실패, 버튼 클릭으로 시도: {e}")
+            log(f"  ⚠️  JavaScript로 찾기/클릭 실패: {e}")
         
-        # 방법 2: 버튼을 정확하게 찾아서 클릭
-        btn = None
+        # 방법 3: 버튼을 찾은 직후 바로 클릭 (StaleElementReferenceException 방지)
+        # 여러 선택자로 시도
+        selectors = [
+            (By.CSS_SELECTOR, "button.ifdata-search-result"),
+            (By.XPATH, "//button[@class='ifdata-search-result' and normalize-space(text())='EXCEL 다운']"),
+            (By.XPATH, "//button[contains(@onclick, 'fnExcelDown')]"),
+            (By.XPATH, "//button[normalize-space(text())='EXCEL 다운']"),
+            (By.XPATH, "//button[contains(text(), 'EXCEL 다운')]"),
+        ]
         
-        # 우선순위 1: CSS 선택자로 클래스와 텍스트로 찾기 (가장 정확)
-        try:
-            all_buttons = driver.find_elements(By.CSS_SELECTOR, "button.ifdata-search-result")
-            for button in all_buttons:
-                if button.text.strip() == "EXCEL 다운" and button.is_displayed():
-                    btn = button
-                    log(f"  🔍 CSS 선택자로 버튼 발견: button.ifdata-search-result")
-                    break
-        except Exception as e:
-            log(f"  ⚠️  CSS 선택자로 찾기 실패: {e}")
-        
-        # 우선순위 2: XPath 선택자로 찾기
-        if not btn:
-            selectors = [
-                "//button[@class='ifdata-search-result' and normalize-space(text())='EXCEL 다운']",
-                "//button[contains(@onclick, 'fnExcelDown')]",
-                "//button[contains(@onclick, 'Excel')]",
-                "//button[normalize-space(text())='EXCEL 다운']",
-                "//button[contains(text(), 'EXCEL 다운')]",
-            ]
-            
-            for selector in selectors:
-                try:
-                    btn = driver.find_element(By.XPATH, selector)
-                    # 버튼 텍스트 재확인
-                    btn_text = btn.text.strip()
-                    if btn_text == "EXCEL 다운" and btn.is_displayed():
-                        log(f"  🔍 XPath로 버튼 발견: {selector}")
-                        break
-                    else:
-                        btn = None
-                except:
-                    continue
-        
-        # 우선순위 3: JavaScript로 직접 찾고 클릭
-        if not btn:
+        for by, selector in selectors:
             try:
-                # JavaScript로 버튼을 찾아서 직접 클릭
-                clicked = driver.execute_script("""
-                    var buttons = document.querySelectorAll('button.ifdata-search-result');
-                    for (var i = 0; i < buttons.length; i++) {
-                        if (buttons[i].textContent.trim() === 'EXCEL 다운') {
-                            buttons[i].scrollIntoView({block: 'center', behavior: 'smooth'});
-                            buttons[i].click();
-                            return true;
-                        }
-                    }
-                    return false;
-                """)
-                if clicked:
-                    log(f"  ✅ JavaScript로 버튼 찾아서 클릭 완료")
-                    # Alert 확인 및 다운로드 시작 확인
+                # 버튼을 찾고 즉시 클릭 (저장하지 않음)
+                btn = driver.find_element(by, selector)
+                if btn.is_displayed() and btn.is_enabled():
+                    # 찾은 직후 바로 클릭 (대기 없이)
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'instant'}); arguments[0].click();", btn)
+                    log(f"  ✅ 버튼 클릭 완료 ({by}, {selector})")
+                    
+                    # Alert 확인 (즉시)
                     alert_shown = False
                     try:
                         alert = Alert(driver)
@@ -895,118 +895,55 @@ def click_excel_download(driver, baseline_files: set = None) -> bool:
                             raise
                         pass
                     
-                    # 다운로드 시작 확인
-                    time.sleep(1.0)
-                    download_started = False
-                    try:
-                        current_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
-                        crdownloads = [f for f in current_files if f.suffix == '.crdownload' and f not in baseline_files]
-                        if crdownloads:
-                            download_started = True
-                            log(f"  📥 다운로드 시작 확인: .crdownload 파일 발견")
-                        excel_files = [f for f in current_files if f.suffix.lower() in ['.xls', '.xlsx'] and f not in baseline_files]
-                        if excel_files:
-                            download_started = True
-                            log(f"  📥 다운로드 시작 확인: 새 엑셀 파일 발견")
-                    except:
-                        pass
-                    
-                    if not download_started and not alert_shown:
-                        log(f"  ⚠️  다운로드 시작 신호가 보이지 않습니다. 계속 대기합니다...")
-                    
                     return True
+            except StaleElementReferenceException:
+                # 요소가 무효화되었으면 다음 방법 시도
+                continue
             except Exception as e:
-                if "DOWNLOAD_LIMIT_100" in str(e) or "NO_DATA_AVAILABLE" in str(e):
-                    raise
-                log(f"  ⚠️  JavaScript로 찾기/클릭 실패: {e}")
+                # 다른 오류면 다음 선택자 시도
+                continue
         
-        if not btn:
-            # 최종 시도: 모든 버튼을 순회하며 찾기
-            try:
-                all_buttons = driver.find_elements(By.TAG_NAME, "button")
-                for button in all_buttons:
-                    try:
-                        if button.text.strip() == "EXCEL 다운" and button.is_displayed():
-                            btn = button
-                            log(f"  🔍 모든 버튼 순회로 발견")
-                            break
-                    except:
-                        continue
-            except Exception as e:
-                log(f"  ⚠️  버튼 순회 실패: {e}")
-        
-        if not btn:
-            raise Exception("EXCEL 다운 버튼을 찾을 수 없습니다")
-        
-        # 버튼이 보이도록 스크롤
+        # 방법 4: 모든 버튼을 순회하며 찾고 즉시 클릭
         try:
-            driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'smooth'});", btn)
-            time.sleep(0.5)
-        except:
-            pass
-        
-        # JavaScript로 직접 클릭 (다른 요소를 건드리지 않도록)
-        try:
-            driver.execute_script("arguments[0].click();", btn)
-            log(f"  ✅ 버튼 클릭 완료 (JavaScript)")
-        except:
-            # JavaScript 클릭 실패 시 일반 클릭 시도
-            try:
-                btn.click()
-                log(f"  ✅ 버튼 클릭 완료 (일반 클릭)")
-            except Exception as e:
-                log(f"  ⚠️  클릭 실패, onclick 직접 호출 시도: {e}")
-                # onclick 속성이 있으면 직접 호출
-                onclick_attr = btn.get_attribute("onclick")
-                if onclick_attr and "fnExcelDown" in onclick_attr:
-                    driver.execute_script("fnExcelDown();")
-                    log(f"  ✅ onclick 직접 호출 완료")
-                else:
-                    raise Exception(f"버튼 클릭 실패: {e}")
-        
-        # Alert 확인 및 다운로드 시작 확인
-        alert_shown = False
-        try:
-            alert = Alert(driver)
-            alert_text = alert.text
-            log(f"  🔔 Alert: {alert_text}")
-            
-            if "100건" in alert_text or "100" in alert_text:
-                alert.accept()
-                raise Exception("DOWNLOAD_LIMIT_100")
-            if "데이터가 존재하지 않습니다" in alert_text or "존재하지 않습니다" in alert_text:
-                alert.accept()
-                raise Exception("NO_DATA_AVAILABLE")
-            
-            alert.accept()
-            alert_shown = True
+            all_buttons = driver.find_elements(By.TAG_NAME, "button")
+            for button in all_buttons:
+                try:
+                    if button.text.strip() == "EXCEL 다운" and button.is_displayed() and button.is_enabled():
+                        # 찾은 직후 바로 클릭
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'instant'}); arguments[0].click();", button)
+                        log(f"  ✅ 모든 버튼 순회로 클릭 완료")
+                        
+                        # Alert 확인 (즉시)
+                        alert_shown = False
+                        try:
+                            alert = Alert(driver)
+                            alert_text = alert.text
+                            log(f"  🔔 Alert: {alert_text}")
+                            
+                            if "100건" in alert_text or "100" in alert_text:
+                                alert.accept()
+                                raise Exception("DOWNLOAD_LIMIT_100")
+                            if "데이터가 존재하지 않습니다" in alert_text or "존재하지 않습니다" in alert_text:
+                                alert.accept()
+                                raise Exception("NO_DATA_AVAILABLE")
+                            
+                            alert.accept()
+                            alert_shown = True
+                        except Exception as e:
+                            if str(e) == "DOWNLOAD_LIMIT_100" or str(e) == "NO_DATA_AVAILABLE":
+                                raise
+                            pass
+                        
+                        return True
+                except StaleElementReferenceException:
+                    continue
+                except:
+                    continue
         except Exception as e:
-            if str(e) == "DOWNLOAD_LIMIT_100" or str(e) == "NO_DATA_AVAILABLE":
-                raise
-            # Alert가 없으면 다운로드가 시작되었을 수 있음
-            pass
+            log(f"  ⚠️  버튼 순회 실패: {e}")
         
-        # 다운로드 시작 확인 (1초 대기 후 .crdownload 파일이나 새 파일 확인)
-        time.sleep(1.0)
-        download_started = False
-        try:
-            current_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
-            crdownloads = [f for f in current_files if f.suffix == '.crdownload' and f not in baseline_files]
-            if crdownloads:
-                download_started = True
-                log(f"  📥 다운로드 시작 확인: .crdownload 파일 발견")
-            excel_files = [f for f in current_files if f.suffix.lower() in ['.xls', '.xlsx'] and f not in baseline_files]
-            if excel_files:
-                download_started = True
-                log(f"  📥 다운로드 시작 확인: 새 엑셀 파일 발견")
-        except:
-            pass
+        raise Exception("EXCEL 다운 버튼을 찾을 수 없습니다")
         
-        if not download_started and not alert_shown:
-            log(f"  ⚠️  다운로드 시작 신호가 보이지 않습니다. 계속 대기합니다...")
-        
-        log(f"  ✅ EXCEL 다운 버튼 클릭 완료")
-        return True
     except Exception as e:
         if "DOWNLOAD_LIMIT_100" in str(e):
             raise  # 100건 제한은 상위로 전달
