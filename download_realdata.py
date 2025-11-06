@@ -37,7 +37,17 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # ==================== 설정 ====================
-DOWNLOAD_DIR = Path(r"D:\OneDrive\office work\부동산 실거래 데이터")
+# CI 환경 감지 (GitHub Actions)
+IS_CI = os.getenv("CI", "") == "true" or os.getenv("GITHUB_ACTIONS", "") == "true"
+
+# 저장 폴더 (환경에 따라 자동 전환)
+if IS_CI:
+    # GitHub Actions: 임시 output 폴더
+    DOWNLOAD_DIR = Path("output")
+else:
+    # 로컬 PC: OneDrive 경로
+    DOWNLOAD_DIR = Path(r"D:\OneDrive\office work\부동산 실거래 데이터")
+
 TEMP_DOWNLOAD_DIR = Path("_temp_downloads")
 MOLIT_URL = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
 
@@ -62,6 +72,8 @@ TAB_NAME_MAPPING = {
 }
 
 TEMP_DOWNLOAD_DIR.mkdir(exist_ok=True)
+if IS_CI:
+    DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 def log(message: str):
     """로그 출력"""
@@ -507,39 +519,81 @@ def download_month(driver, property_type: str, year: int, month: int) -> Optiona
         log(f"다운로드 오류 ({property_type} {year:04d}{month:02d}): {e}")
         return None
 
-def move_and_upload_file(downloaded_file: Path, property_type: str, year: int, month: int) -> Path:
+def move_and_upload_file(downloaded_file: Path, property_type: str, year: int, month: int) -> Optional[Path]:
     """파일 이동 및 Google Drive 업로드"""
-    dest_dir = DOWNLOAD_DIR / property_type
-    dest_dir.mkdir(exist_ok=True)
-    
     filename = f"{property_type} {year:04d}{month:02d}.xlsx"
-    dest_path = dest_dir / filename
     
-    # 파일 이동 (덮어쓰기)
-    if dest_path.exists():
-        dest_path.unlink()
-    downloaded_file.rename(dest_path)
-    log(f"  📁 저장: {dest_path}")
-    
-    # Google Drive 업로드
-    if DRIVE_UPLOAD_ENABLED:
+    # CI 환경에서는 로컬 저장 없이 바로 Google Drive에 업로드
+    if IS_CI:
+        # 임시 파일로 전처리
+        temp_processed = TEMP_DOWNLOAD_DIR / filename
+        downloaded_file.rename(temp_processed)
+        
+        # 전처리
+        if not preprocess_excel_file(temp_processed):
+            log(f"전처리 실패: {temp_processed.name}")
+            return None
+        
+        # Google Drive 업로드
+        if DRIVE_UPLOAD_ENABLED:
+            try:
+                log(f"  ☁️  Google Drive 업로드 중...")
+                uploader = get_uploader()
+                if uploader.init_service():
+                    uploader.upload_file(temp_processed, filename, property_type)
+                    log(f"  ✅ Google Drive 업로드 완료")
+                else:
+                    log(f"  ⚠️  Google Drive 업로드 실패: 서비스 초기화 실패")
+            except Exception as e:
+                log(f"  ⚠️  Google Drive 업로드 실패: {e}")
+        
+        # 임시 파일 삭제
         try:
-            log(f"  ☁️  Google Drive 업로드 중...")
-            uploader = get_uploader()
-            if uploader.init_service():
-                uploader.upload_file(dest_path, filename, property_type)
-                log(f"  ✅ Google Drive 업로드 완료")
-            else:
-                log(f"  ⚠️  Google Drive 업로드 실패: 서비스 초기화 실패")
-        except Exception as e:
-            log(f"  ⚠️  Google Drive 업로드 실패: {e}")
-    
-    return dest_path
+            temp_processed.unlink()
+        except:
+            pass
+        
+        return None
+    else:
+        # 로컬 환경: 로컬 저장 후 Google Drive 업로드
+        dest_dir = DOWNLOAD_DIR / property_type
+        dest_dir.mkdir(exist_ok=True)
+        dest_path = dest_dir / filename
+        
+        # 파일 이동 (덮어쓰기)
+        if dest_path.exists():
+            dest_path.unlink()
+        downloaded_file.rename(dest_path)
+        log(f"  📁 저장: {dest_path}")
+        
+        # 전처리
+        if not preprocess_excel_file(dest_path):
+            log(f"전처리 실패: {dest_path.name}")
+            return None
+        
+        # Google Drive 업로드
+        if DRIVE_UPLOAD_ENABLED:
+            try:
+                log(f"  ☁️  Google Drive 업로드 중...")
+                uploader = get_uploader()
+                if uploader.init_service():
+                    uploader.upload_file(dest_path, filename, property_type)
+                    log(f"  ✅ Google Drive 업로드 완료")
+                else:
+                    log(f"  ⚠️  Google Drive 업로드 실패: 서비스 초기화 실패")
+            except Exception as e:
+                log(f"  ⚠️  Google Drive 업로드 실패: {e}")
+        
+        return dest_path
 
 def main():
     """메인 함수"""
     log("="*70)
     log("최근 3개월치 데이터 다운로드 및 전처리 시작")
+    if IS_CI:
+        log("환경: GitHub Actions (CI)")
+    else:
+        log("환경: 로컬 PC")
     log("="*70)
     
     # 최근 3개월 계산
@@ -563,15 +617,11 @@ def main():
                     log(f"다운로드 실패: {property_type} {year:04d}{month:02d}")
                     continue
                 
-                # 파일 이동
+                # 파일 이동 및 업로드
                 dest_path = move_and_upload_file(downloaded_file, property_type, year, month)
                 
-                # 전처리
-                if not preprocess_excel_file(dest_path):
-                    log(f"전처리 실패: {dest_path.name}")
-                    continue
-                
-                log(f"완료: {property_type} {year:04d}{month:02d}")
+                if dest_path or IS_CI:
+                    log(f"완료: {property_type} {year:04d}{month:02d}")
                 
     finally:
         driver.quit()
@@ -582,4 +632,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
