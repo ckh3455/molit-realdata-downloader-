@@ -48,7 +48,7 @@ TEMP_DOWNLOAD_DIR = Path("_temp_downloads")
 # 국토부 URL (엑셀 다운로드 페이지)
 MOLIT_URL = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
 
-# 부동산 종목 (8개)
+# 부동산 종목 (7개)
 PROPERTY_TYPES = [
     "아파트",
     "연립다세대",
@@ -56,7 +56,6 @@ PROPERTY_TYPES = [
     "오피스텔",
     "토지",
     "상업업무용",
-    "분양입주권",
     "공장창고등"
 ]
 
@@ -68,7 +67,6 @@ SECTION_START_YEAR = {
     "오피스텔": 2006,
     "토지": 2006,
     "상업업무용": 2006,
-    "분양입주권": 2013,  # 2013년 9월부터 데이터 존재
     "공장창고등": 2006,
 }
 
@@ -80,7 +78,6 @@ SECTION_START_MONTH = {
     "오피스텔": 1,
     "토지": 1,
     "상업업무용": 1,
-    "분양입주권": 9,  # 2013년 9월부터 데이터 존재
     "공장창고등": 1,
 }
 
@@ -92,7 +89,6 @@ TAB_NAME_MAPPING = {
     "오피스텔": "오피스텔",
     "토지": "토지",
     "상업업무용": "상업/업무용",
-    "분양입주권": "분양/입주권",
     "공장창고등": "공장/창고 등",
 }
 
@@ -209,7 +205,6 @@ def select_property_tab(driver, tab_name: str) -> bool:
         "연립다세대": "xlsTab2",
         "단독다가구": "xlsTab3",
         "오피스텔": "xlsTab4",
-        "분양입주권": "xlsTab5",
         "상업업무용": "xlsTab6",
         "토지": "xlsTab7",
         "공장창고등": "xlsTab8",
@@ -571,7 +566,7 @@ def click_excel_download(driver) -> bool:
         log(f"  ❌ 다운 버튼 클릭 실패: {e}")
         return False
 
-def wait_for_download(timeout: int = 15, baseline_files: set = None) -> Optional[Path]:
+def wait_for_download(timeout: int = 10, baseline_files: set = None) -> Optional[Path]:
     """다운로드 완료 대기 - 개선된 감지 로직"""
     start_time = time.time()
     
@@ -901,8 +896,8 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                 continue
             return False
         
-        # 다운로드 대기 (15초)
-        downloaded = wait_for_download(timeout=15, baseline_files=baseline_files)
+        # 다운로드 대기 (10초)
+        downloaded = wait_for_download(timeout=10, baseline_files=baseline_files)
         
         if downloaded:
             # 성공! 이동 및 이름 변경
