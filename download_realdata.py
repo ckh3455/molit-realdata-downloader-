@@ -110,17 +110,16 @@ def sanitize_folder_name(name: str) -> str:
 def build_driver():
     """크롬 드라이버 생성"""
     opts = Options()
-    # CI 환경에서는 headless 모드 필수, 로컬에서는 브라우저 창 보이기
-    if IS_CI:
-        opts.add_argument("--headless=new")
+    # 브라우저 창 강제로 보이기 (디버깅용)
+    # CI 환경에서도 일단 주석 처리하여 브라우저 상태 확인 가능하도록
+    # if IS_CI:
+    #     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
-    if not IS_CI:
-        # 로컬 실행 시 창 최대화 (브라우저 창 보이기)
-        opts.add_argument("--start-maximized")
-    else:
-        opts.add_argument("--window-size=1400,900")
+    # 브라우저 창 보이기
+    opts.add_argument("--start-maximized")
+    opts.add_argument("--window-size=1400,900")
     opts.add_argument("--lang=ko-KR")
     
     # 로컬 실행 시 안정성 개선
@@ -1288,20 +1287,9 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                 except:
                     pass
                 
-                # 다운로드 성공 후 페이지 상태 확인 및 재설정
-                # 다음 다운로드를 위해 페이지가 올바른 상태인지 확인
-                try:
-                    # xls.do 페이지인지 확인
-                    if "xls.do" not in driver.current_url:
-                        log(f"  🔄 페이지 재로딩...")
-                        driver.get(MOLIT_URL)
-                        time.sleep(3)
-                        try_accept_alert(driver, 2.0)
-                    
-                    # 탭이 올바르게 선택되어 있는지 확인
-                    time.sleep(1.0)
-                except:
-                    pass
+                # 다운로드 성공 후 간단한 대기 (다음 다운로드를 위한 준비)
+                # 페이지 재로드는 main 함수에서 처리
+                time.sleep(1.0)
                 
                 return True
             except Exception as e:
@@ -1495,6 +1483,19 @@ def main():
                 month_key = f"{year:04d}{month:02d}"
                 
                 log(f"\n[{month_idx}/{len(section_monthly_dates)}]", end=" ")
+                
+                # 두 번째 다운로드부터는 페이지를 재로드하고 탭을 다시 선택 (안정성 향상)
+                if month_idx > 1:
+                    try:
+                        log(f"  🔄 페이지 재로딩 및 탭 재선택...")
+                        driver.get(MOLIT_URL)
+                        time.sleep(3)
+                        try_accept_alert(driver, 2.0)
+                        if not select_property_tab(driver, property_type):
+                            log(f"  ⚠️  탭 재선택 실패, 계속 진행...")
+                        time.sleep(1.0)
+                    except Exception as e:
+                        log(f"  ⚠️  페이지 재설정 실패, 계속 진행: {e}")
                 
                 # 다운로드 시도 (최대 3회 재시도)
                 success = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3)
