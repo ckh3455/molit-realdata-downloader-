@@ -559,7 +559,7 @@ def click_excel_download(driver) -> bool:
         log(f"  ❌ 다운 버튼 클릭 실패: {e}")
         return False
 
-def wait_for_download(timeout: int = 10, baseline_files: set = None) -> Optional[Path]:
+def wait_for_download(timeout: int = 15, baseline_files: set = None) -> Optional[Path]:
     """다운로드 완료 대기 - 개선된 감지 로직"""
     start_time = time.time()
     
@@ -888,8 +888,8 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                 continue
             return False
         
-        # 다운로드 대기 (10초)
-        downloaded = wait_for_download(timeout=10, baseline_files=baseline_files)
+        # 다운로드 대기 (15초)
+        downloaded = wait_for_download(timeout=15, baseline_files=baseline_files)
         
         if downloaded:
             # 성공! 이동 및 이름 변경
