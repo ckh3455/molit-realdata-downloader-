@@ -948,6 +948,9 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
             elif "DOWNLOAD_LIMIT_100" in str(e):
                 raise  # 100건 제한은 상위로 전달
         
+        # 날짜 설정 후 페이지 반영 대기
+        time.sleep(2.0)
+        
         # 다운로드 클릭 직전 파일 목록 저장
         baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
         
