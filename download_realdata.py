@@ -115,7 +115,11 @@ def build_driver():
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
-    opts.add_argument("--window-size=1400,900")
+    if not IS_CI:
+        # 로컬 실행 시 창 최대화
+        opts.add_argument("--start-maximized")
+    else:
+        opts.add_argument("--window-size=1400,900")
     opts.add_argument("--lang=ko-KR")
     
     # 로컬 실행 시 안정성 개선
@@ -297,6 +301,8 @@ def select_property_tab(driver, tab_name: str) -> bool:
             
             # 활성화 확인 (부모에 'on' 클래스가 있으면 활성화됨)
             if "on" in parent_class_after:
+                # 탭 선택 후 Google Translate 팝업 제거
+                remove_google_translate_popup(driver)
                 log(f"  ✅ 탭 선택 완료 (ID): {tab_name}")
                 return True
             else:
@@ -308,6 +314,8 @@ def select_property_tab(driver, tab_name: str) -> bool:
                 parent_after2 = elem.find_element(By.XPATH, "./..")
                 parent_class_after2 = parent_after2.get_attribute("class")
                 if "on" in parent_class_after2:
+                    # 탭 선택 후 Google Translate 팝업 제거
+                    remove_google_translate_popup(driver)
                     log(f"  ✅ 탭 선택 완료 (ID, 재시도): {tab_name}")
                     return True
                 else:
@@ -340,6 +348,8 @@ def select_property_tab(driver, tab_name: str) -> bool:
                         driver.execute_script("arguments[0].click();", elem)
                         time.sleep(2)
                         try_accept_alert(driver, 2.0)
+                        # 탭 선택 후 Google Translate 팝업 제거
+                        remove_google_translate_popup(driver)
                         log(f"  ✅ 탭 선택 완료 (CSS): {tab_name}")
                         return True
         except Exception as e:
@@ -380,6 +390,8 @@ def select_property_tab(driver, tab_name: str) -> bool:
             
             time.sleep(2)
             try_accept_alert(driver, 2.0)
+            # 탭 선택 후 Google Translate 팝업 제거
+            remove_google_translate_popup(driver)
             
             log(f"  ✅ 탭 선택 완료: {tab_name}")
             return True
@@ -440,6 +452,8 @@ def select_property_tab(driver, tab_name: str) -> bool:
                     
                     time.sleep(2)
                     try_accept_alert(driver, 2.0)
+                    # 탭 선택 후 Google Translate 팝업 제거
+                    remove_google_translate_popup(driver)
                     
                     log(f"  ✅ 탭 선택 완료: {tab_name}")
                     return True
@@ -476,6 +490,8 @@ def select_property_tab(driver, tab_name: str) -> bool:
                         
                         time.sleep(2)
                         try_accept_alert(driver, 2.0)
+                        # 탭 선택 후 Google Translate 팝업 제거
+                        remove_google_translate_popup(driver)
                         
                         log(f"  ✅ 탭 선택 완료: {tab_name}")
                         return True
@@ -513,6 +529,8 @@ def select_property_tab(driver, tab_name: str) -> bool:
         if result:
             time.sleep(2)
             try_accept_alert(driver, 2.0)
+            # 탭 선택 후 Google Translate 팝업 제거
+            remove_google_translate_popup(driver)
             log(f"  ✅ 탭 선택 완료 (JavaScript): {tab_name}")
             return True
     except Exception as e:
