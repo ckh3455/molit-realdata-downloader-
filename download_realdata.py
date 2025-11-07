@@ -187,7 +187,7 @@ def upload_processed(file_path: Path, prop_kind: str):
     else:
         meta = {'name': name, 'parents': [folder_id]}
         svc.files().create(body=meta, media_body=media, fields='id', supportsAllDrives=True).execute()
-        log(f"  - drive: uploaded (create) → {full_path_for_log}")f"  - drive: uploaded (create) → {full_path_for_log}")
+        log(f"  - drive: uploaded (create) → {full_path_for_log}") → {full_path_for_log}")f"  - drive: uploaded (create) → {full_path_for_log}")
 
 
 # ==================== 아래부터 다운로드/전처리/셀레니움 로직 ====================
