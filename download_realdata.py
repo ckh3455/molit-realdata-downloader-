@@ -109,12 +109,6 @@ def detect_base_parent_id(svc):
     default_name = "부동산 실거래자료"
     guess = find_child_folder_id(svc, DRIVE_ROOT_ID, default_name)
     return guess or DRIVE_ROOT_ID
-    for seg in [p for p in path.split('/') if p.strip()]:
-        found = find_child_folder_id(svc, current, seg.strip())
-        if not found:
-            return None
-        current = found
-    return current
 
 
 def upload_processed(file_path: Path, prop_kind: str):
@@ -178,17 +172,16 @@ def upload_processed(file_path: Path, prop_kind: str):
     # 풀 경로 형태 로그: [루트]/[베이스]/[종목]/파일명
     path_parts = [p for p in [root_name, base_name, subfolder, name] if p]
     full_path_for_log = "/".join(path_parts) if path_parts else f"{subfolder}/{name}"
-    log(f"  - drive target: {full_path_for_log} (https://drive.google.com/drive/folders/{folder_id})"f"  - drive target: {full_path_for_log} (https://drive.google.com/drive/folders/{folder_id})")
+    log(f"  - drive target: {full_path_for_log} (https://drive.google.com/drive/folders/{folder_id})")
 
     if files:
         fid = files[0]['id']
         svc.files().update(fileId=fid, media_body=media, supportsAllDrives=True).execute()
         log(f"  - drive: overwritten (update) → {full_path_for_log}")
     else:
-    meta = {'name': name, 'parents': [folder_id]}
-    svc.files().create(body=meta, media_body=media, fields='id', supportsAllDrives=True).execute()
-    log(f"  - drive: uploaded (create) -> {full_path_for_log}")
-
+        meta = {'name': name, 'parents': [folder_id]}
+        svc.files().create(body=meta, media_body=media, fields='id', supportsAllDrives=True).execute()
+        log(f"  - drive: uploaded (create) → {full_path_for_log}") → {full_path_for_log}") → {full_path_for_log}")f"  - drive: uploaded (create) → {full_path_for_log}")
 
 
 # ==================== 아래부터 다운로드/전처리/셀레니움 로직 ====================
