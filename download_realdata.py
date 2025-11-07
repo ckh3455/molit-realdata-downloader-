@@ -1362,6 +1362,12 @@ def wait_for_download(timeout: int = 15, baseline_files: set = None, expected_ye
     
     return None
 
+def preprocess_file(file_path: Path) -> Path:
+    """파일 전처리 (필요시)"""
+    # 현재는 전처리 로직이 없지만, 필요시 여기에 추가
+    # 예: 데이터 정제, 컬럼 추가, 형식 변환 등
+    return file_path
+
 def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, month: int) -> Path:
     """다운로드 파일을 목적지로 이동 및 이름 변경"""
     # 폴더 생성
@@ -1373,17 +1379,32 @@ def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, m
     filename = f"{property_type} {year:04d}{month:02d}.xlsx"
     dest_path = dest_dir / filename
     
+    # 기존 파일이 있으면 삭제 (덮어쓰기)
+    if dest_path.exists():
+        dest_path.unlink()
+        log(f"  🗑️  기존 파일 삭제: {filename}")
+    
     # 이동
     downloaded_file.rename(dest_path)
     log(f"  📁 저장: {dest_path}")
     
-    # Google Drive 업로드
+    # 파일 전처리
+    try:
+        log(f"  전처리 시작: {filename}")
+        preprocessed_path = preprocess_file(dest_path)
+        log(f"  전처리 완료: {filename}")
+    except Exception as e:
+        log(f"  ⚠️  전처리 실패: {e}")
+        # 전처리 실패해도 계속 진행
+    
+    # Google Drive 업로드 (덮어쓰기 모드)
     if DRIVE_UPLOAD_ENABLED:
         try:
             log(f"  ☁️  Google Drive 업로드 중...")
             uploader = get_uploader()
             if uploader.init_service():
-                uploader.upload_file(dest_path, filename, property_type)
+                # 덮어쓰기 모드로 업로드 (기존 파일이 있으면 업데이트)
+                uploader.upload_file(dest_path, filename, property_type, overwrite=True)
                 log(f"  ✅ Google Drive 업로드 완료")
             else:
                 log(f"  ⚠️  Google Drive 업로드 실패: 서비스 초기화 실패")
