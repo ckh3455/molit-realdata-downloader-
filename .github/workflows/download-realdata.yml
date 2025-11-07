@@ -1,58 +1,50 @@
-name: Download Real Estate Data
+name: RT MOLIT pipeline (03:00 KST)
 
 on:
   schedule:
-    - cron: '0 2 * * *'
-  workflow_dispatch:
+    # GitHub Actions는 UTC 기준. 03:00 KST = 18:00 UTC (전날)
+    - cron: "0 18 * * *"
+  workflow_dispatch: {}
 
 jobs:
-  download:
+  run:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Google Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-linux-signing-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/google-linux-signing-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+        # webdriver_manager가 크롬 버전에 맞는 드라이버를 자동 설치합니다.
+
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # Chrome은 공식 액션으로 설치하는 게 깔끔함
-      - name: Set up Chrome
-        uses: browser-actions/setup-chrome@v1
-
-      - name: Download Real Estate Data (Drive upload mode)
+      - name: Run script
         env:
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          GDRIVE_BASE_PATH: ${{ vars.GDRIVE_BASE_PATH }}
+          GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          OUT_DIR: output
+          DOWNLOAD_TIMEOUT: "60"
+          CLICK_RETRY_MAX: "20"
+          CLICK_RETRY_WAIT: "1.5"
           CI: "1"
-          # === 스크립트가 자동 인식하는 이름 ===
-          GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}   # 서비스계정(JSON 또는 base64)
-          GDRIVE_FOLDER_ID:        ${{ secrets.GDRIVE_FOLDER_ID }}          # 업로드 '폴더' ID
-          ARTIFACTS_ONLY: "0"                                              # Drive로만 업로드
-          # 필요 시 종목 지정(기본: 아파트). 예: "오피스텔", "토지" ...
-          # PROP_KIND: "아파트"
+          CHROME_BIN: "/usr/bin/google-chrome"
         run: |
-          python download_realdata.py --update-mode
-
-      # ↓ 아티팩트는 "원할 때만" (ARTIFACTS_ONLY=1) 업로드하도록 조건부 처리
-      - name: Upload XLSX artifacts
-        if: env.ARTIFACTS_ONLY == '1'
-        uses: actions/upload-artifact@v4
-        with:
-          name: molit-xlsx-${{ github.run_number }}
-          path: output/*.xlsx
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload progress file
-        if: env.ARTIFACTS_ONLY == '1'
-        uses: actions/upload-artifact@v4
-        with:
-          name: download-progress
-          path: download_progress.json
-          if-no-files-found: ignore
-          retention-days: 30
+          python download_realdata.py
