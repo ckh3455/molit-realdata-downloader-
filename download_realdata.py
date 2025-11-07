@@ -1310,19 +1310,10 @@ def wait_for_download(timeout: int = 15, baseline_files: set = None, expected_ye
                 
                 # 크기가 3번 연속 같으면 안정화된 것으로 간주 (약 0.6초)
                 if stable_count.get(file_key, 0) >= 3:
-                    # 파일이 우리가 요청한 파일인지 검증 (생성 시간으로 확인)
-                    file_mtime = latest.stat().st_mtime
-                    time_diff = file_mtime - start_time
-                    
-                    # 파일이 다운로드 시작 후 30초 이내에 생성되었으면 우리가 요청한 파일로 간주
-                    # 10초 대기 전에 생성된 파일도 허용 (음수 시간 허용 범위 확대)
-                    if time_diff >= -10 and time_diff <= 30:
-                        log(f"  ✅ 다운로드 완료: {latest.name} ({size:,} bytes, 생성: {time_diff:.1f}초 전)")
-                        return latest
-                    else:
-                        # 너무 오래된 파일이면 다른 파일일 수 있음 (로그 출력 빈도 줄이기)
-                        if elapsed_int % 5 == 0:
-                            log(f"  ⚠️  파일 발견했지만 생성 시간이 이상함: {latest.name} (생성: {time_diff:.1f}초 전)")
+                    # baseline_files 이후에 생성된 새 파일이면 우리가 요청한 파일로 간주
+                    # 생성 시간 체크 불필요 - baseline_files 기준으로 새 파일만 확인하면 됨
+                    log(f"  ✅ 다운로드 완료: {latest.name} ({size:,} bytes)")
+                    return latest
                 else:
                     # 아직 크기가 변하는 중
                     if elapsed_int % 2 == 0:
