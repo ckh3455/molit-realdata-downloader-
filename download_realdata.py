@@ -25,9 +25,21 @@ import os, re, sys, time, json, shutil, tempfile
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple, List
+import argparse
 
-import numpy as np
-import pandas as pd
+# --- 런타임 의존성 보정(액션에서 모듈 누락 시 자동 설치) ---
+try:
+    import numpy as np  # type: ignore
+    import pandas as pd  # type: ignore
+except ModuleNotFoundError:
+    import subprocess
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install", "--upgrade",
+        "numpy", "pandas", "openpyxl", "webdriver-manager",
+        "google-api-python-client", "google-auth", "python-dateutil"
+    ])
+    import numpy as np  # type: ignore
+    import pandas as pd  # type: ignore
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -652,4 +664,8 @@ def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    # 깃헙 액션 호환: --update-mode 플래그가 넘어와도 무시하고 동작
+    parser.add_argument("--update-mode", action="store_true")
+    _ = parser.parse_args()
     main()
