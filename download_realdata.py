@@ -5,7 +5,6 @@
 - 진행 상황 저장 및 재개
 - 100회 제한 대응 (다음날 자동 재개)
 - 업데이트 모드 (최근 1년만 갱신)
-- 탭 선택 로직 개선
 
 파일명: download_realdata.py
 """
@@ -25,7 +24,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.alert import Alert
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import UnexpectedAlertPresentException, TimeoutException, StaleElementReferenceException
+from selenium.common.exceptions import UnexpectedAlertPresentException, TimeoutException
 
 # Google Drive 업로드 모듈
 try:
@@ -95,7 +94,7 @@ TAB_NAME_MAPPING = {
     "공장창고등": "공장/창고 등",
 }
 
-# 탭 ID 매핑 (실제 페이지 구조 기반)
+# 탭 ID 매핑
 TAB_ID_MAPPING = {
     "아파트": "xlsTab1",
     "연립다세대": "xlsTab2",
@@ -122,19 +121,14 @@ def sanitize_folder_name(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '_', name)
 
 def build_driver():
-    """크롬 드라이버 생성 (Chrome DevTools Protocol 활성화)"""
+    """크롬 드라이버 생성"""
     opts = Options()
-    # CI 환경 확인 (더 확실하게)
     is_ci_env = os.getenv("CI") == "1" or os.getenv("GITHUB_ACTIONS") == "true"
     
-    # CI 환경이 아니면 무조건 브라우저 창 보이기
     if is_ci_env:
-        # CI 환경 (GitHub Actions 등) - headless 필수
         opts.add_argument("--headless=new")
         opts.add_argument("--window-size=1400,900")
     else:
-        # 로컬 환경 - 브라우저 창 무조건 보이기
-        # headless 옵션 절대 사용 안 함
         opts.add_argument("--start-maximized")
     
     opts.add_argument("--no-sandbox")
@@ -142,32 +136,26 @@ def build_driver():
     opts.add_argument("--disable-gpu")
     opts.add_argument("--lang=ko-KR")
     
-    # Chrome DevTools Protocol 활성화 (디버깅용)
-    # 로컬 환경에서만 디버깅 포트 활성화
     if not is_ci_env:
         opts.add_argument("--remote-debugging-port=9222")
         opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option('useAutomationExtension', False)
         log("🔧 Chrome DevTools Protocol 활성화 (포트 9222)")
-        log("   브라우저 상태 확인: http://localhost:9222")
     
-    # 다운로드 설정
     prefs = {
         "download.default_directory": str(TEMP_DOWNLOAD_DIR.absolute()),
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
         "safebrowsing.enabled": True,
-        "profile.default_content_setting_values.notifications": 2,  # 알림 차단
-        "profile.content_settings.exceptions.automatic_downloads.*.setting": 1,  # 자동 다운로드 허용 (알림 없이)
+        "profile.default_content_setting_values.notifications": 2,
+        "profile.content_settings.exceptions.automatic_downloads.*.setting": 1,
     }
     opts.add_experimental_option("prefs", prefs)
     
-    # 자동 다운로드 알림 비활성화
     opts.add_argument("--disable-notifications")
     opts.add_argument("--disable-infobars")
     
-    # CI 환경
     chromedriver_bin = os.getenv("CHROMEDRIVER_BIN")
     if chromedriver_bin and Path(chromedriver_bin).exists():
         service = Service(chromedriver_bin)
@@ -186,7 +174,6 @@ def remove_google_translate_popup(driver):
     """Google Translate 팝업 강제 제거/숨김"""
     try:
         driver.execute_script("""
-            // Google Translate 관련 모든 요소 찾아서 제거 또는 숨김
             const selectors = [
                 'div[class*="translate"]',
                 'div[id*="translate"]',
@@ -203,34 +190,16 @@ def remove_google_translate_popup(driver):
                 try {
                     const elements = document.querySelectorAll(selector);
                     elements.forEach(el => {
-                        // iframe인 경우
                         if (el.tagName === 'IFRAME') {
                             el.style.display = 'none';
                             el.style.visibility = 'hidden';
                             el.style.width = '0';
                             el.style.height = '0';
                         } else {
-                            // 일반 요소는 제거
                             el.remove();
                         }
                     });
                 } catch(e) {}
-            });
-            
-            // body에 직접 추가된 Google Translate 요소도 찾기
-            const allDivs = document.querySelectorAll('div');
-            allDivs.forEach(div => {
-                const text = div.textContent || '';
-                const className = div.className || '';
-                const id = div.id || '';
-                if ((text.includes('Google Translate') || 
-                     (text.includes('영어') && text.includes('한국어')) ||
-                     className.includes('translate') ||
-                     id.includes('translate')) && 
-                    div.offsetParent !== null) {
-                    div.style.display = 'none';
-                    div.style.visibility = 'hidden';
-                }
             });
         """)
     except:
@@ -245,15 +214,11 @@ def try_accept_alert(driver, timeout=3.0) -> bool:
             text = alert.text
             log(f"  🔔 Alert: {text}")
             
-            # 100건 제한 감지
             if "100건" in text or "100" in text:
                 alert.accept()
                 log(f"  ⛔ 일일 다운로드 100건 제한 도달!")
-                log(f"  💾 진행 상황이 저장되었습니다.")
-                log(f"  ⏰ 내일 다시 실행하면 이어서 진행됩니다.")
                 raise Exception("DOWNLOAD_LIMIT_100")
             
-            # 데이터 없음 감지
             if "데이터가 존재하지 않습니다" in text or "존재하지 않습니다" in text:
                 alert.accept()
                 log(f"  ℹ️  해당 기간에 데이터가 없습니다.")
@@ -264,203 +229,67 @@ def try_accept_alert(driver, timeout=3.0) -> bool:
             return True
         except Exception as e:
             if str(e) == "DOWNLOAD_LIMIT_100":
-                raise  # 100건 제한은 상위로 전달
+                raise
             if str(e) == "NO_DATA_AVAILABLE":
-                raise  # 데이터 없음은 상위로 전달
+                raise
             time.sleep(0.2)
     return False
 
-def select_property_tab(driver, tab_name: str, max_retries: int = 3) -> bool:
-    """부동산 종목 탭 선택 - 개선 버전
-    
-    Args:
-        driver: Selenium WebDriver
-        tab_name: 탭 이름 (예: "아파트", "연립다세대")
-        max_retries: 최대 재시도 횟수
-    
-    Returns:
-        bool: 성공 여부
-    """
+def select_property_tab(driver, tab_name: str) -> bool:
+    """부동산 종목 탭 선택 - 개선 버전"""
     actual_tab_name = TAB_NAME_MAPPING.get(tab_name, tab_name)
     tab_id = TAB_ID_MAPPING.get(tab_name)
     
-    log(f"  🎯 탭 선택 시도: {tab_name} (페이지: {actual_tab_name}, ID: {tab_id})")
+    log(f"  탭 선택: {tab_name} (ID: {tab_id})")
     
-    for attempt in range(1, max_retries + 1):
+    # 페이지 로딩 완료 대기
+    try:
+        WebDriverWait(driver, 15).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+    except:
+        pass
+    
+    # 탭 컨테이너 로딩 대기
+    try:
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "ul.quarter-tab-cover"))
+        )
+    except:
+        log(f"  ⚠️ 탭 컨테이너 타임아웃")
+        return False
+    
+    time.sleep(1)
+    try_accept_alert(driver, 2.0)
+    remove_google_translate_popup(driver)
+    
+    # ID로 탭 클릭
+    if tab_id:
         try:
-            log(f"  🔄 시도 {attempt}/{max_retries}")
-            
-            # 1. 페이지 확인 및 로딩
-            if "xls.do" not in driver.current_url:
-                log(f"  📄 페이지 이동: {MOLIT_URL}")
-                driver.get(MOLIT_URL)
-                
-            # 2. 페이지 완전 로딩 대기
-            try:
-                WebDriverWait(driver, 15).until(
-                    lambda d: d.execute_script("return document.readyState") == "complete"
-                )
-                log(f"  ✅ 페이지 로딩 완료")
-            except TimeoutException:
-                log(f"  ⚠️  페이지 로딩 타임아웃")
-            
+            elem = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.ID, tab_id))
+            )
+            driver.execute_script("arguments[0].click();", elem)
             time.sleep(2)
-            
-            # 3. Alert 처리
-            try_accept_alert(driver, 2.0)
-            
-            # 4. Google Translate 팝업 제거
-            remove_google_translate_popup(driver)
-            
-            # 5. 탭 컨테이너 로딩 대기
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "ul.quarter-tab-cover"))
-                )
-                log(f"  ✅ 탭 컨테이너 로딩 완료")
-            except TimeoutException:
-                log(f"  ⚠️  탭 컨테이너 타임아웃")
-                if attempt < max_retries:
-                    time.sleep(3)
-                    continue
-                return False
-            
-            # 6. 탭 요소 찾기 및 클릭
-            tab_clicked = False
-            
-            # 방법 1: ID로 직접 찾기 (가장 확실)
-            if tab_id:
-                try:
-                    log(f"  🔍 방법 1: ID로 탭 찾기 ({tab_id})")
-                    elem = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable((By.ID, tab_id))
-                    )
-                    
-                    # JavaScript로 클릭 (더 안정적)
-                    driver.execute_script("""
-                        arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});
-                        arguments[0].click();
-                    """, elem)
-                    
-                    log(f"  ✅ 탭 클릭 완료 (ID)")
-                    tab_clicked = True
-                    
-                except (TimeoutException, StaleElementReferenceException) as e:
-                    log(f"  ⚠️  ID로 찾기 실패: {type(e).__name__}")
-            
-            # 방법 2: JavaScript로 직접 찾아서 클릭
-            if not tab_clicked:
-                try:
-                    log(f"  🔍 방법 2: JavaScript로 탭 찾기")
-                    clicked = driver.execute_script(f"""
-                        // ID로 찾기
-                        var elem = document.getElementById('{tab_id}');
-                        if (elem && elem.offsetParent !== null) {{
-                            elem.scrollIntoView({{block: 'center', behavior: 'instant'}});
-                            elem.click();
-                            return true;
-                        }}
-                        
-                        // 텍스트로 찾기
-                        var links = document.querySelectorAll('ul.quarter-tab-cover a');
-                        var targetText = '{actual_tab_name}';
-                        for (var i = 0; i < links.length; i++) {{
-                            var link = links[i];
-                            var text = link.textContent.trim();
-                            if (text === targetText && link.offsetParent !== null) {{
-                                link.scrollIntoView({{block: 'center', behavior: 'instant'}});
-                                link.click();
-                                return true;
-                            }}
-                        }}
-                        return false;
-                    """)
-                    
-                    if clicked:
-                        log(f"  ✅ 탭 클릭 완료 (JavaScript)")
-                        tab_clicked = True
-                    else:
-                        log(f"  ⚠️  JavaScript로 탭을 찾을 수 없음")
-                        
-                except Exception as e:
-                    log(f"  ⚠️  JavaScript 실행 실패: {e}")
-            
-            if not tab_clicked:
-                if attempt < max_retries:
-                    log(f"  ⏳ 3초 대기 후 재시도...")
-                    time.sleep(3)
-                    continue
-                log(f"  ❌ 모든 방법 실패")
-                return False
-            
-            # 7. 클릭 후 처리
-            time.sleep(2)  # 탭 전환 대기
             try_accept_alert(driver, 2.0)
             remove_google_translate_popup(driver)
             
-            # 8. 활성화 확인
-            try:
-                is_active = driver.execute_script(f"""
-                    var elem = document.getElementById('{tab_id}');
-                    if (elem) {{
-                        var parent = elem.parentElement;
-                        return parent && parent.className.includes('on');
-                    }}
-                    return false;
-                """)
-                
-                if is_active:
-                    log(f"  ✅ 탭 활성화 확인됨")
-                else:
-                    log(f"  ⚠️  탭이 활성화되지 않음, 한 번 더 클릭 시도")
-                    # 한 번 더 클릭
-                    driver.execute_script(f"""
-                        var elem = document.getElementById('{tab_id}');
-                        if (elem) {{
-                            elem.click();
-                        }}
-                    """)
-                    time.sleep(2)
-                    try_accept_alert(driver, 2.0)
-                    
-            except Exception as e:
-                log(f"  ⚠️  활성화 확인 실패: {e}")
+            # 날짜 필드 준비 확인
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "#srchBgnDe"))
+            )
+            time.sleep(1)
             
-            # 9. 날짜 입력 필드 대기 (페이지 준비 확인)
-            try:
-                date_field = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "#srchBgnDe"))
-                )
-                # 필드가 활성화되고 값을 설정할 수 있는지 확인
-                driver.execute_script("arguments[0].value = '';", date_field)
-                log(f"  ✅ 페이지 준비 완료 (날짜 필드 확인)")
-                
-                # 추가 안정화 대기
-                time.sleep(1)
-                
-                return True
-                
-            except TimeoutException:
-                log(f"  ⚠️  날짜 입력 필드 타임아웃")
-                if attempt < max_retries:
-                    time.sleep(3)
-                    continue
-                return False
-                
+            log(f"  ✅ 탭 선택 완료")
+            return True
         except Exception as e:
-            log(f"  ❌ 예외 발생: {type(e).__name__} - {e}")
-            if attempt < max_retries:
-                log(f"  ⏳ 3초 대기 후 재시도...")
-                time.sleep(3)
-                continue
+            log(f"  ❌ 탭 클릭 실패: {e}")
             return False
     
-    log(f"  ❌ {max_retries}회 시도 모두 실패")
     return False
 
 def find_date_inputs(driver) -> Tuple[object, object]:
     """시작일/종료일 입력 박스 찾기"""
-    # 명시적 ID 우선
     try:
         start = driver.find_element(By.CSS_SELECTOR, "#srchBgnDe")
         end = driver.find_element(By.CSS_SELECTOR, "#srchEndDe")
@@ -468,7 +297,6 @@ def find_date_inputs(driver) -> Tuple[object, object]:
     except:
         pass
     
-    # name 속성
     try:
         start = driver.find_element(By.CSS_SELECTOR, "input[name='srchBgnDe']")
         end = driver.find_element(By.CSS_SELECTOR, "input[name='srchEndDe']")
@@ -476,7 +304,6 @@ def find_date_inputs(driver) -> Tuple[object, object]:
     except:
         pass
     
-    # type=date
     dates = driver.find_elements(By.CSS_SELECTOR, "input[type='date']")
     if len(dates) >= 2:
         return dates[0], dates[1]
@@ -491,7 +318,6 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
         start_val = start_date.isoformat()
         end_val = end_date.isoformat()
         
-        # JavaScript로 강제 입력
         driver.execute_script("""
             arguments[0].value = arguments[1];
             arguments[0].dispatchEvent(new Event('input', {bubbles:true}));
@@ -506,7 +332,6 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
         
         time.sleep(0.5)
         
-        # 검증
         actual_start = start_el.get_attribute("value")
         actual_end = end_el.get_attribute("value")
         
@@ -522,20 +347,16 @@ def set_dates(driver, start_date: date, end_date: date) -> bool:
         return False
 
 def click_excel_download(driver, baseline_files: set = None) -> bool:
-    """EXCEL 다운 버튼 클릭 - fnExcelDown() 함수 호출 (창 변화 대응)"""
+    """EXCEL 다운 버튼 클릭"""
     try:
-        # Google Translate 팝업 강제 제거/숨김
         remove_google_translate_popup(driver)
         
-        # baseline_files가 없으면 현재 파일 목록 사용
         if baseline_files is None:
             baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
         
-        # 방법 1: JavaScript 함수 직접 호출 (가장 안전 - 창 변화에 영향 없음)
         try:
-            # fnExcelDown 함수가 준비되었는지 확인 (최대 3초 대기)
             fn_ready = False
-            for wait_attempt in range(6):  # 0.5초씩 6번 = 최대 3초
+            for wait_attempt in range(6):
                 fn_ready = driver.execute_script("return typeof fnExcelDown === 'function';")
                 if fn_ready:
                     break
@@ -543,7 +364,6 @@ def click_excel_download(driver, baseline_files: set = None) -> bool:
                     time.sleep(0.5)
             
             if fn_ready:
-                # 함수 호출과 Alert 처리, 다운로드 확인을 하나의 스크립트로 실행
                 result = driver.execute_script("""
                     try {
                         if (typeof fnExcelDown === 'function') {
@@ -557,9 +377,7 @@ def click_excel_download(driver, baseline_files: set = None) -> bool:
                 """)
                 
                 if result and result.get('success'):
-                    log(f"  ✅ EXCEL 다운 버튼 클릭 (JavaScript 함수 직접 호출)")
-                    # Alert 확인 (즉시)
-                    alert_shown = False
+                    log(f"  ✅ EXCEL 다운 버튼 클릭")
                     try:
                         alert = Alert(driver)
                         alert_text = alert.text
@@ -567,55 +385,30 @@ def click_excel_download(driver, baseline_files: set = None) -> bool:
                         
                         if "100건" in alert_text or "100" in alert_text:
                             alert.accept()
-                            log(f"  ⛔ 일일 다운로드 100건 제한 도달!")
                             raise Exception("DOWNLOAD_LIMIT_100")
                         
                         if "데이터가 존재하지 않습니다" in alert_text or "존재하지 않습니다" in alert_text:
                             alert.accept()
-                            log(f"  ℹ️  해당 기간에 데이터가 없습니다.")
                             raise Exception("NO_DATA_AVAILABLE")
                         
                         alert.accept()
-                        alert_shown = True
                     except Exception as e:
                         if str(e) == "DOWNLOAD_LIMIT_100" or str(e) == "NO_DATA_AVAILABLE":
                             raise
-                        # Alert가 없으면 다운로드가 시작되었을 수 있음
                         pass
                     
                     return True
-            else:
-                log(f"  ⚠️  fnExcelDown 함수를 찾을 수 없습니다")
         except Exception as e:
             if "DOWNLOAD_LIMIT_100" in str(e) or "NO_DATA_AVAILABLE" in str(e):
                 raise
-            log(f"  ⚠️  JavaScript 함수 호출 실패, 버튼 클릭으로 시도: {e}")
+            log(f"  ⚠️  함수 호출 실패: {e}")
         
-        # 방법 2: JavaScript로 버튼을 찾아서 즉시 클릭 (원자적 작업)
         try:
             clicked = driver.execute_script("""
-                // 버튼을 찾고 즉시 클릭 (창이 변하기 전에)
                 var buttons = document.querySelectorAll('button.ifdata-search-result');
                 for (var i = 0; i < buttons.length; i++) {
                     var btn = buttons[i];
                     if (btn.textContent.trim() === 'EXCEL 다운' && btn.offsetParent !== null) {
-                        // 스크롤과 클릭을 한 번에
-                        btn.scrollIntoView({block: 'center', behavior: 'instant'});
-                        btn.click();
-                        return true;
-                    }
-                }
-                // CSS 선택자로 못 찾으면 XPath 시도
-                var xpathButtons = document.evaluate(
-                    "//button[contains(text(), 'EXCEL 다운')]",
-                    document,
-                    null,
-                    XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
-                    null
-                );
-                for (var i = 0; i < xpathButtons.snapshotLength; i++) {
-                    var btn = xpathButtons.snapshotItem(i);
-                    if (btn.offsetParent !== null) {
                         btn.scrollIntoView({block: 'center', behavior: 'instant'});
                         btn.click();
                         return true;
@@ -625,195 +418,523 @@ def click_excel_download(driver, baseline_files: set = None) -> bool:
             """)
             
             if clicked:
-                log(f"  ✅ JavaScript로 버튼 찾아서 클릭 완료")
-                # Alert 확인 (즉시)
-                alert_shown = False
-                try:
-                    alert = Alert(driver)
-                    alert_text = alert.text
-                    log(f"  🔔 Alert: {alert_text}")
-                    
-                    if "100건" in alert_text or "100" in alert_text:
-                        alert.accept()
-                        raise Exception("DOWNLOAD_LIMIT_100")
-                    if "데이터가 존재하지 않습니다" in alert_text or "존재하지 않습니다" in alert_text:
-                        alert.accept()
-                        raise Exception("NO_DATA_AVAILABLE")
-                    
-                    alert.accept()
-                    alert_shown = True
-                except Exception as e:
-                    if str(e) == "DOWNLOAD_LIMIT_100" or str(e) == "NO_DATA_AVAILABLE":
-                        raise
-                    pass
-                
+                log(f"  ✅ 버튼 클릭 완료")
+                try_accept_alert(driver, 2.0)
                 return True
         except Exception as e:
             if "DOWNLOAD_LIMIT_100" in str(e) or "NO_DATA_AVAILABLE" in str(e):
                 raise
-            log(f"  ⚠️  JavaScript로 찾기/클릭 실패: {e}")
-        
-        # 방법 3: WebDriverWait를 사용한 명시적 대기
-        try:
-            log(f"  🔍 방법 3: WebDriverWait로 버튼 찾기")
-            button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'EXCEL 다운')]"))
-            )
-            
-            # JavaScript로 클릭
-            driver.execute_script("arguments[0].scrollIntoView({block:'center', behavior:'instant'}); arguments[0].click();", button)
-            log(f"  ✅ 버튼 클릭 완료 (WebDriverWait)")
-            
-            # Alert 확인
-            try_accept_alert(driver, 2.0)
-            return True
-            
-        except TimeoutException:
-            log(f"  ⚠️  버튼을 찾을 수 없음 (타임아웃)")
-        except Exception as e:
-            if "DOWNLOAD_LIMIT_100" in str(e) or "NO_DATA_AVAILABLE" in str(e):
-                raise
-            log(f"  ⚠️  버튼 클릭 실패: {e}")
+            log(f"  ⚠️  클릭 실패: {e}")
         
         log(f"  ❌ EXCEL 다운 버튼을 찾을 수 없습니다")
         raise Exception("EXCEL 다운 버튼을 찾을 수 없습니다")
         
     except Exception as e:
         if "DOWNLOAD_LIMIT_100" in str(e):
-            raise  # 100건 제한은 상위로 전달
+            raise
         if "NO_DATA_AVAILABLE" in str(e):
-            raise  # 데이터 없음은 상위로 전달
+            raise
         log(f"  ❌ 다운 버튼 클릭 실패: {e}")
-        import traceback
-        traceback.print_exc()
         return False
 
 def wait_for_download(timeout: int = 15, baseline_files: set = None, expected_year: int = None, expected_month: int = None, driver=None) -> Optional[Path]:
-    """다운로드 완료 대기 - 개선된 감지 로직 (즉시 감지 시작)"""
+    """다운로드 완료 대기"""
     start_time = time.time()
     
-    # baseline이 없으면 현재 파일 목록 사용
     if baseline_files is None:
         baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
     
     log(f"  ⏳ 다운로드 대기 중... (최대 {timeout}초)")
-    log(f"  📁 감시 폴더: {TEMP_DOWNLOAD_DIR.absolute()}")
-    log(f"  📊 기존 파일: {len(baseline_files)}개")
-    if expected_year and expected_month:
-        log(f"  🎯 예상 파일: {expected_year:04d}-{expected_month:02d} 데이터")
     
-    # 초기 대기 시간 제거 - 즉시 감지 시작
-    # 다운로드가 시작되면 .crdownload 파일이나 새 파일이 즉시 나타날 수 있음
-    
-    found_crdownload = False
-    found_any_file = False
-    last_check_time = start_time
     last_size = {}
-    stable_count = {}  # 파일 크기가 안정된 횟수
-    no_file_warning_shown = False
+    stable_count = {}
     
     while time.time() - start_time < timeout:
-        elapsed = time.time() - start_time
-        elapsed_int = int(elapsed)
-        current_time = time.time()
-        
-        # 처음 5초는 0.1초마다, 그 이후는 0.2초마다 체크
-        check_interval = 0.1 if elapsed < 5.0 else 0.2
-        if current_time - last_check_time < check_interval:
-            time.sleep(0.05)
-            continue
-        last_check_time = current_time
-        
-        # 현재 폴더의 모든 파일
         current_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
         
-        # .crdownload 파일 확인 (다운로드 진행 중)
         crdownloads = [f for f in current_files if f.suffix == '.crdownload']
         if crdownloads:
-            found_crdownload = True
-            found_any_file = True
-            # 가장 최근 .crdownload 파일
-            latest_crdownload = max(crdownloads, key=lambda p: p.stat().st_mtime)
-            size = latest_crdownload.stat().st_size
-            # 로그 출력 빈도 줄이기: 5초마다만 출력
-            if elapsed_int > 0 and elapsed_int % 5 == 0:
-                log(f"  ⏳ 다운로드 진행중... ({elapsed_int}초, {size:,} bytes)")
             continue
         
-        # 엑셀 파일 찾기 - 새 파일만
         excel_files = [
             f for f in current_files 
             if f.is_file() 
             and f.suffix.lower() in ['.xls', '.xlsx']
-            and f not in baseline_files  # 기존 파일 제외
+            and f not in baseline_files
         ]
         
         if excel_files:
-            found_any_file = True
-            # 가장 최근 파일 (mtime 기준) - 우리가 방금 요청한 파일일 가능성이 높음
             latest = max(excel_files, key=lambda p: p.stat().st_mtime)
             size = latest.stat().st_size
             
-            # 파일이 있고 크기가 1KB 이상이면
             if size > 1000:
                 file_key = str(latest)
                 
-                # 크기 안정화 확인 (연속으로 3번 같은 크기면 안정화된 것으로 간주)
                 if file_key in last_size:
                     if last_size[file_key] == size:
                         stable_count[file_key] = stable_count.get(file_key, 0) + 1
                     else:
-                        # 크기가 변했으면 카운트 리셋
                         stable_count[file_key] = 0
                         last_size[file_key] = size
                 else:
                     last_size[file_key] = size
                     stable_count[file_key] = 0
                 
-                # 크기가 3번 연속 같으면 안정화된 것으로 간주 (약 0.6초)
                 if stable_count.get(file_key, 0) >= 3:
-                    # baseline_files 이후에 생성된 새 파일이면 우리가 요청한 파일로 간주
-                    # 생성 시간 체크 불필요 - baseline_files 기준으로 새 파일만 확인하면 됨
                     log(f"  ✅ 다운로드 완료: {latest.name} ({size:,} bytes)")
                     return latest
-                else:
-                    # 아직 크기가 변하는 중
-                    if elapsed_int % 2 == 0:
-                        log(f"  📝 파일 쓰기 중... ({size:,} bytes, 안정화 대기: {stable_count.get(file_key, 0)}/3)")
         
-        # 다운로드가 시작되지 않았을 때 경고 메시지 (한 번만) - 10초 후에만 표시
-        # elapsed는 실수이므로 10.0 이상일 때만 경고
-        if not found_any_file and elapsed >= 10.0 and not no_file_warning_shown:
-            elapsed_rounded = round(elapsed, 1)
-            log(f"  ⚠️  다운로드가 시작되지 않은 것 같습니다. ({elapsed_rounded}초 경과)")
-            log(f"     - 다운로드 폴더 확인: {TEMP_DOWNLOAD_DIR.absolute()}")
-            log(f"     - 브라우저의 다운로드 설정을 확인하세요")
-            no_file_warning_shown = True
+        time.sleep(0.2)
     
-    # 타임아웃
     log(f"  ⏱️  타임아웃 ({timeout}초)")
-    
-    # 디버깅: 새 파일이 있는지 확인
-    all_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
-    new_files = [f for f in all_files if f not in baseline_files]
-    
-    if new_files:
-        log(f"  🆕 새 파일 발견: {len(new_files)}개")
-        for f in new_files:
-            file_mtime = f.stat().st_mtime
-            time_diff = file_mtime - start_time
-            log(f"     - {f.name} ({f.stat().st_size:,} bytes, 생성: {time_diff:.1f}초 전)")
-        
-        # 가장 최근 파일이라도 반환 (검증 실패했지만 파일은 있음)
-        latest = max(new_files, key=lambda p: p.stat().st_mtime)
-        if latest.suffix.lower() in ['.xls', '.xlsx']:
-            log(f"  ⚠️  검증 실패했지만 가장 최근 파일 반환: {latest.name}")
-            return latest
-    else:
-        log(f"  ⚠️  새 파일 없음 (전체 {len(all_files)}개)")
-    
     return None
 
-# ... (나머지 함수들은 동일하므로 생략)
-# preprocess_file, move_and_rename_file, generate_monthly_dates, load_progress, save_progress,
-# is_already_downloaded, check_if_all_historical_complete, download_single_month_with_retry, main
+def preprocess_file(file_path: Path) -> Path:
+    """파일 전처리"""
+    return file_path
+
+def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, month: int) -> Path:
+    """다운로드 파일을 목적지로 이동 및 이름 변경"""
+    folder_name = sanitize_folder_name(property_type)
+    dest_dir = DOWNLOAD_DIR / folder_name
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    
+    filename = f"{property_type} {year:04d}{month:02d}.xlsx"
+    dest_path = dest_dir / filename
+    
+    if dest_path.exists():
+        dest_path.unlink()
+        log(f"  🗑️  기존 파일 삭제: {filename}")
+    
+    downloaded_file.rename(dest_path)
+    log(f"  📁 저장: {dest_path}")
+    
+    try:
+        preprocessed_path = preprocess_file(dest_path)
+    except Exception as e:
+        log(f"  ⚠️  전처리 실패: {e}")
+    
+    if DRIVE_UPLOAD_ENABLED:
+        try:
+            log(f"  ☁️  Google Drive 업로드 중...")
+            uploader = get_uploader()
+            if uploader.init_service():
+                uploader.upload_file(dest_path, filename, property_type)
+                log(f"  ✅ Google Drive 업로드 완료")
+        except Exception as e:
+            log(f"  ⚠️  Google Drive 업로드 실패: {e}")
+    
+    return dest_path
+
+def generate_monthly_dates(start_year: int = 2006, start_month: int = 1) -> List[Tuple[date, date]]:
+    """월별 날짜 생성"""
+    today = date.today()
+    current = date(start_year, start_month, 1)
+    dates = []
+    
+    while current <= today:
+        if current.month == 12:
+            next_month = date(current.year + 1, 1, 1)
+        else:
+            next_month = date(current.year, current.month + 1, 1)
+        
+        last_day = next_month - timedelta(days=1)
+        
+        if current.year == today.year and current.month == today.month:
+            last_day = today
+        
+        dates.append((current, last_day))
+        current = next_month
+    
+    return dates
+
+def load_progress() -> dict:
+    """진행 상황 로드"""
+    if PROGRESS_FILE.exists():
+        with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+            progress = json.load(f)
+            if progress:
+                return progress
+    
+    if DRIVE_UPLOAD_ENABLED:
+        try:
+            log("📂 Google Drive에서 진행 상황 확인 중...")
+            uploader = get_uploader()
+            if uploader.init_service():
+                progress = {}
+                today = date.today()
+                
+                for property_type in PROPERTY_TYPES:
+                    prop_key = sanitize_folder_name(property_type)
+                    all_months = uploader.get_all_file_months(property_type)
+                    
+                    if not all_months:
+                        continue
+                    
+                    section_start_year = SECTION_START_YEAR.get(property_type, 2006)
+                    section_start_month = SECTION_START_MONTH.get(property_type, 1)
+                    expected_months = set()
+                    current = date(section_start_year, section_start_month, 1)
+                    while current <= today:
+                        expected_months.add((current.year, current.month))
+                        if current.month == 12:
+                            current = date(current.year + 1, 1, 1)
+                        else:
+                            current = date(current.year, current.month + 1, 1)
+                    
+                    missing_months = expected_months - all_months
+                    
+                    if missing_months:
+                        oldest_missing = min(missing_months)
+                        last_year, last_month = oldest_missing
+                        if last_month == 1:
+                            completed_year = last_year - 1
+                            completed_month = 12
+                        else:
+                            completed_year = last_year
+                            completed_month = last_month - 1
+                        month_key = f"{completed_year:04d}{completed_month:02d}"
+                        progress[prop_key] = {
+                            "last_month": month_key,
+                            "last_update": datetime.now().isoformat(),
+                            "missing_count": len(missing_months)
+                        }
+                    else:
+                        last_year, last_month = max(all_months)
+                        month_key = f"{last_year:04d}{last_month:02d}"
+                        progress[prop_key] = {
+                            "last_month": month_key,
+                            "last_update": datetime.now().isoformat()
+                        }
+                
+                if progress:
+                    save_progress(progress)
+                    return progress
+        except Exception as e:
+            log(f"⚠️  Google Drive 확인 실패: {e}")
+    
+    return {}
+
+def save_progress(progress: dict):
+    """진행 상황 저장"""
+    with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
+        json.dump(progress, f, indent=2, ensure_ascii=False)
+
+def is_already_downloaded(property_type: str, year: int, month: int, update_mode: bool = False) -> bool:
+    """이미 다운로드된 파일인지 확인"""
+    if update_mode:
+        today = date.today()
+        months_to_subtract = 2
+        if today.month <= months_to_subtract:
+            update_start_year = today.year - 1
+            update_start_month = today.month + 12 - months_to_subtract
+        else:
+            update_start_year = today.year
+            update_start_month = today.month - months_to_subtract
+        
+        file_date = date(year, month, 1)
+        update_start_date = date(update_start_year, update_start_month, 1)
+        if file_date >= update_start_date:
+            return False
+    
+    folder_name = sanitize_folder_name(property_type)
+    filename = f"{property_type} {year:04d}{month:02d}.xlsx"
+    dest_path = DOWNLOAD_DIR / folder_name / filename
+    
+    if dest_path.exists():
+        return True
+    
+    if DRIVE_UPLOAD_ENABLED:
+        try:
+            uploader = get_uploader()
+            if uploader.init_service():
+                if uploader.check_file_exists(filename, property_type):
+                    return True
+        except:
+            pass
+    
+    return False
+
+def download_single_month_with_retry(driver, property_type: str, start_date: date, end_date: date, max_retries: int = 3, update_mode: bool = False) -> bool:
+    """단일 월 다운로드 - 재시도 포함"""
+    year = start_date.year
+    month = start_date.month
+    
+    log(f"\n{'='*60}")
+    log(f"📅 {property_type} {year}년 {month}월")
+    log(f"{'='*60}")
+    
+    if is_already_downloaded(property_type, year, month, update_mode=update_mode):
+        log(f"  ⏭️  이미 존재함, 스킵")
+        return True
+    
+    try:
+        for old_file in TEMP_DOWNLOAD_DIR.glob("*.xlsx"):
+            old_file.unlink()
+        for old_file in TEMP_DOWNLOAD_DIR.glob("*.xls"):
+            old_file.unlink()
+    except Exception as e:
+        log(f"  🧹 temp 폴더 정리 실패: {e}")
+    
+    for attempt in range(1, max_retries + 1):
+        log(f"  🔄 시도 {attempt}/{max_retries}")
+        
+        if not set_dates(driver, start_date, end_date):
+            if attempt < max_retries:
+                time.sleep(5)
+                continue
+            return False
+        
+        try:
+            try_accept_alert(driver, 2.0)
+        except Exception as e:
+            if "NO_DATA_AVAILABLE" in str(e):
+                return True
+            elif "DOWNLOAD_LIMIT_100" in str(e):
+                raise
+        
+        time.sleep(2.0)
+        
+        baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
+        
+        try:
+            if not click_excel_download(driver, baseline_files=baseline_files):
+                if attempt < max_retries:
+                    driver.get(MOLIT_URL)
+                    time.sleep(3)
+                    try_accept_alert(driver, 2.0)
+                    if not select_property_tab(driver, property_type):
+                        log(f"  ⚠️  탭 재선택 실패")
+                    time.sleep(5)
+                    continue
+                return False
+            
+            time.sleep(10.0)
+            
+        except Exception as e:
+            if "NO_DATA_AVAILABLE" in str(e):
+                return True
+            elif "DOWNLOAD_LIMIT_100" in str(e):
+                raise
+            if attempt < max_retries:
+                driver.get(MOLIT_URL)
+                time.sleep(8)
+                try_accept_alert(driver, 2.0)
+                remove_google_translate_popup(driver)
+                
+                if not select_property_tab(driver, property_type):
+                    log(f"  ⚠️  탭 재선택 실패")
+                time.sleep(5)
+                continue
+            return False
+        
+        downloaded = wait_for_download(timeout=15, baseline_files=baseline_files, expected_year=year, expected_month=month, driver=driver)
+        
+        if downloaded:
+            try:
+                move_and_rename_file(downloaded, property_type, year, month)
+                
+                try:
+                    for temp_file in TEMP_DOWNLOAD_DIR.glob("*"):
+                        try:
+                            if temp_file.is_file():
+                                temp_file.unlink()
+                        except:
+                            pass
+                except:
+                    pass
+                
+                time.sleep(1.0)
+                return True
+            except Exception as e:
+                log(f"  ❌ 파일 이동 실패: {e}")
+                if attempt < max_retries:
+                    driver.get(MOLIT_URL)
+                    time.sleep(8)
+                    try_accept_alert(driver, 2.0)
+                    remove_google_translate_popup(driver)
+                    
+                    if not select_property_tab(driver, property_type):
+                        log(f"  ⚠️  탭 재선택 실패")
+                    time.sleep(5)
+                    continue
+                return False
+        else:
+            if attempt < max_retries:
+                driver.get(MOLIT_URL)
+                time.sleep(8)
+                try_accept_alert(driver, 2.0)
+                remove_google_translate_popup(driver)
+                
+                if not select_property_tab(driver, property_type):
+                    log(f"  ⚠️  탭 재선택 실패")
+                time.sleep(5)
+            else:
+                log(f"  ❌ {max_retries}회 시도 모두 실패")
+                return False
+    
+    return False
+
+def main():
+    """메인 함수"""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test-mode", action="store_true")
+    parser.add_argument("--max-months", type=int, default=2)
+    parser.add_argument("--update-mode", action="store_true")
+    args = parser.parse_args()
+    
+    log("="*70)
+    log("🚀 국토부 실거래가 데이터 다운로드")
+    log("="*70)
+    
+    progress = load_progress()
+    
+    today = date.today()
+    target_month_key = f"{today.year:04d}{today.month:02d}"
+    properties_to_download = []
+    
+    for property_type in PROPERTY_TYPES:
+        prop_key = sanitize_folder_name(property_type)
+        last_completed = progress.get(prop_key, {}).get("last_month", "")
+        
+        if not last_completed or last_completed < target_month_key:
+            properties_to_download.append(property_type)
+    
+    if args.update_mode:
+        if not properties_to_download:
+            update_mode = True
+            properties_to_download = PROPERTY_TYPES
+        else:
+            update_mode = False
+    elif not properties_to_download:
+        update_mode = True
+        properties_to_download = PROPERTY_TYPES
+    else:
+        update_mode = False
+    
+    if update_mode:
+        months_to_subtract = 2
+        if today.month <= months_to_subtract:
+            start_year = today.year - 1
+            start_month = today.month + 12 - months_to_subtract
+        else:
+            start_year = today.year
+            start_month = today.month - months_to_subtract
+        monthly_dates = generate_monthly_dates(start_year, start_month)
+    else:
+        monthly_dates = generate_monthly_dates(2006, 1)
+    
+    if args.test_mode:
+        monthly_dates = monthly_dates[-args.max_months:]
+    
+    driver = build_driver()
+    total_success = 0
+    total_fail = 0
+    
+    try:
+        log("🌐 사이트 접속 중...")
+        driver.get(MOLIT_URL)
+        time.sleep(5)
+        try_accept_alert(driver, 2.0)
+        remove_google_translate_popup(driver)
+        
+        for prop_idx, property_type in enumerate(properties_to_download, 1):
+            log("="*70)
+            log(f"📊 [{prop_idx}/{len(properties_to_download)}] {property_type}")
+            log("="*70)
+            
+            if not select_property_tab(driver, property_type):
+                log(f"⚠️  탭 선택 실패, 다음 종목으로...")
+                continue
+            
+            prop_key = sanitize_folder_name(property_type)
+            last_completed = progress.get(prop_key, {}).get("last_month", "")
+            
+            if update_mode:
+                today = date.today()
+                months_to_subtract = 2
+                if today.month <= months_to_subtract:
+                    start_year = today.year - 1
+                    start_month = today.month + 12 - months_to_subtract
+                else:
+                    start_year = today.year
+                    start_month = today.month - months_to_subtract
+                section_monthly_dates = generate_monthly_dates(start_year, start_month)
+            else:
+                if last_completed:
+                    last_year = int(last_completed[:4])
+                    last_month = int(last_completed[4:6])
+                    if last_month == 12:
+                        start_year = last_year + 1
+                        start_month = 1
+                    else:
+                        start_year = last_year
+                        start_month = last_month + 1
+                else:
+                    section_start_year = SECTION_START_YEAR.get(property_type, 2006)
+                    section_start_month = SECTION_START_MONTH.get(property_type, 1)
+                    start_year = section_start_year
+                    start_month = section_start_month
+                section_monthly_dates = generate_monthly_dates(start_year, start_month)
+            
+            success_count = 0
+            fail_count = 0
+            
+            for month_idx, (start_date, end_date) in enumerate(section_monthly_dates, 1):
+                year = start_date.year
+                month = start_date.month
+                month_key = f"{year:04d}{month:02d}"
+                
+                if month_idx > 1:
+                    driver.get(MOLIT_URL)
+                    time.sleep(8)
+                    try_accept_alert(driver, 2.0)
+                    remove_google_translate_popup(driver)
+                    
+                    if not select_property_tab(driver, property_type):
+                        log(f"  ⚠️  탭 재선택 실패")
+                
+                if is_already_downloaded(property_type, year, month, update_mode=update_mode):
+                    continue
+                
+                success = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3, update_mode=update_mode)
+                
+                if success:
+                    success_count += 1
+                    
+                    if prop_key not in progress:
+                        progress[prop_key] = {}
+                    progress[prop_key]["last_month"] = month_key
+                    progress[prop_key]["last_update"] = datetime.now().isoformat()
+                    save_progress(progress)
+                else:
+                    fail_count += 1
+                
+                time.sleep(5)
+            
+            total_success += success_count
+            total_fail += fail_count
+            
+            if args.test_mode:
+                break
+        
+        log("="*70)
+        log("🎉 다운로드 완료!")
+        log(f"📊 전체 통계: 성공 {total_success}, 실패 {total_fail}")
+        log("="*70)
+        
+    except Exception as e:
+        if str(e) == "DOWNLOAD_LIMIT_100":
+            log("\n" + "="*70)
+            log("⛔ 일일 다운로드 100건 제한 도달")
+            log("="*70)
+        else:
+            log(f"\n❌ 오류 발생: {e}")
+    finally:
+        try:
+            driver.quit()
+        except:
+            pass
+
+if __name__ == "__main__":
+    main()
