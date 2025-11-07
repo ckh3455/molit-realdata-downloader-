@@ -89,6 +89,7 @@ def detect_base_parent_id(svc):
     guess = find_child_folder_id(svc, DRIVE_ROOT_ID, "부동산 실거래자료")
     return guess or DRIVE_ROOT_ID
 
+
 def upload_processed(file_path: Path, prop_kind: str):
     """전처리된 파일을 기존 공유드라이브 경로로 덮어쓰기 업로드.
     - 폴더는 새로 만들지 않음(경로 없으면 스킵하고 로그 남김).
@@ -456,7 +457,7 @@ def _drop_no_col(df: pd.DataFrame) -> pd.DataFrame:
             break
     return df
 
-
+# === 변경 1: '시군구' 보존 + 파생 컬럼 추가 ===
 def _split_sigungu(df: pd.DataFrame) -> pd.DataFrame:
     """'시군구'는 삭제하지 않고 보존하면서 파생 컬럼(광역/구/법정동/리)을 추가."""
     if "시군구" not in df.columns:
@@ -468,6 +469,27 @@ def _split_sigungu(df: pd.DataFrame) -> pd.DataFrame:
     return df  # 원본 '시군구' 유지
 
 
+def _split_yymm(df: pd.DataFrame) -> pd.DataFrame:
+    if "계약년월" not in df.columns:
+        return df
+    s = df["계약년월"].astype(str).str.replace(r"\D", "", regex=True)
+    df["계약년"] = s.str.slice(0, 4)
+    df["계약월"] = s.str.slice(4, 6)
+    return df.drop(columns=["계약년월"])  # 원본 제거
+
+
+def _normalize_numbers(df: pd.DataFrame) -> pd.DataFrame:
+    for col in ["거래금액(만원)", "전용면적(㎡)", "면적(㎡)"]:
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str)
+                     .str.replace(r"[^0-9.\-]", "", regex=True)
+                     .replace({"": np.nan})
+            )
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+# === 변경 2: 헤더 지정 순서로 정렬 ===
 def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
     """요청하신 정확한 헤더 순서로 정렬하고, 나머지 컬럼은 뒤에 보존."""
     target_order = [
@@ -482,17 +504,36 @@ def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.reindex(columns=ordered + others)
 
 
+# === 변경 3: 검증 규칙 — '시군구' 허용, '계약년월'만 금지 ===
 def _assert_preprocessed(df: pd.DataFrame):
-    """금지/필수 컬럼 검증 규칙을 '시군구' 허용으로 변경."""
     cols = set(df.columns)
-    # '계약년월'만 금지(시군구는 허용)
     banned = [c for c in ["계약년월"] if c in cols]
     if banned:
         raise RuntimeError(f"전처리 실패: 금지 컬럼 잔존 {banned}")
-    # 핵심 파생 컬럼 존재 여부 확인
     for must in ["광역","구","법정동","계약년","계약월"]:
         if must not in cols:
             raise RuntimeError(f"전처리 실패: 필수 컬럼 누락 {must}")
+
+
+# === 파이프라인(유지) ===
+def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    전처리 파이프라인:
+      1) NO 컬럼 제거
+      2) 시군구 분해(보존) -> 광역/구/법정동/리 추가
+      3) 계약년월 -> 계약년/계약월 분리
+      4) 숫자형 정규화
+      5) 최종 컬럼 순서 정렬(요청 순서)
+    """
+    return _reorder_columns(
+        _normalize_numbers(
+            _split_yymm(
+                _split_sigungu(
+                    _drop_no_col(df)
+                )
+            )
+        )
+    )
 
 
 def save_excel(path: Path, df: pd.DataFrame):
