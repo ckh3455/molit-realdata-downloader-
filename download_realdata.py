@@ -3,7 +3,23 @@
 # 2) 서비스계정: GCP_SERVICE_ACCOUNT_KEY → SA_ENV_VAR_NAME로 연결
 # 3) 파일명: "아파트 2509_251107.xlsx" → "아파트 202509.xlsx" 형식으로 변경
 
-import os, json, base64, sys, subprocess\nfrom pathlib import Path\nfrom datetime import date, timedelta, datetime\n\n# --- 런타임 의존성 자동 설치 (액션 환경에서 pandas 미설치 대비) ---\ntry:\n    import pandas as pd  # type: ignore\n    import numpy as np  # type: ignore\n    import openpyxl  # type: ignore\nexcept ModuleNotFoundError:\n    subprocess.check_call([\n        sys.executable, "-m", "pip", "install", "--upgrade",\n        "pandas", "numpy", "openpyxl", "python-dateutil", "pytz", "tzdata"\n    ])\n    import pandas as pd  # type: ignore\n    import numpy as np  # type: ignore\n    import openpyxl  # type: ignore
+import os, json, base64, sys, subprocess
+from pathlib import Path
+from datetime import date, timedelta, datetime
+
+# --- 런타임 의존성 자동 설치 (액션 환경에서 pandas 미설치 대비) ---
+try:
+    import pandas as pd  # type: ignore
+    import numpy as np  # type: ignore
+    import openpyxl  # type: ignore
+except ModuleNotFoundError:
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install", "--upgrade",
+        "pandas", "numpy", "openpyxl", "python-dateutil", "pytz", "tzdata"
+    ])
+    import pandas as pd  # type: ignore
+    import numpy as np  # type: ignore
+    import openpyxl  # type: ignore
 
 # ---------- 기본 설정 ----------
 PROP_KIND = os.getenv("PROP_KIND", "아파트").strip()
