@@ -1736,7 +1736,7 @@ def main():
         if not properties_to_download:
             # 모든 섹션이 완료되었으면 업데이트 모드
             update_mode = True
-            log("🔄 강제 업데이트 모드: 최근 1년치만 갱신")
+            log("🔄 강제 업데이트 모드: 최근 3개월치만 갱신")
             properties_to_download = PROPERTY_TYPES  # 모든 섹션 처리
         else:
             # 파일이 없는 섹션이 있으면 전체 다운로드 모드
@@ -1746,7 +1746,7 @@ def main():
         # 모든 섹션이 완료되었으면 업데이트 모드로 전환
         update_mode = True
         log("✅ 모든 섹션이 2006-01부터 현재까지 완료되었습니다!")
-        log("🔄 업데이트 모드로 전환: 최근 1년치만 갱신")
+        log("🔄 업데이트 모드로 전환: 최근 3개월치만 갱신")
         properties_to_download = PROPERTY_TYPES  # 모든 섹션을 업데이트 모드로 처리
     else:
         # 완료되지 않은 섹션이 있으면 전체 다운로드 모드
@@ -1757,9 +1757,14 @@ def main():
     
     # 날짜 범위 생성
     if update_mode:
-        # 최근 1년 (13개월 - 여유있게)
-        start_year = today.year - 1
-        start_month = today.month
+        # 최근 3개월
+        months_to_subtract = 2  # 현재 월 포함하여 3개월
+        if today.month <= months_to_subtract:
+            start_year = today.year - 1
+            start_month = today.month + 12 - months_to_subtract
+        else:
+            start_year = today.year
+            start_month = today.month - months_to_subtract
         monthly_dates = generate_monthly_dates(start_year, start_month)
         log(f"📅 다운로드 기간: {start_year}-{start_month:02d} ~ {today.strftime('%Y-%m')} ({len(monthly_dates)}개월)")
     else:
@@ -1813,10 +1818,16 @@ def main():
             
             # 이 섹션에 대한 월별 날짜 범위 생성
             if update_mode:
-                # 업데이트 모드: 최근 1년만 갱신 (last_completed와 무관하게)
+                # 업데이트 모드: 최근 3개월만 갱신 (last_completed와 무관하게)
                 today = date.today()
-                start_year = today.year - 1
-                start_month = today.month
+                # 최근 3개월 계산
+                months_to_subtract = 2  # 현재 월 포함하여 3개월
+                if today.month <= months_to_subtract:
+                    start_year = today.year - 1
+                    start_month = today.month + 12 - months_to_subtract
+                else:
+                    start_year = today.year
+                    start_month = today.month - months_to_subtract
                 section_monthly_dates = generate_monthly_dates(start_year, start_month)
             else:
                 # 전체 다운로드 모드: 2006-01부터
@@ -1867,8 +1878,9 @@ def main():
                         try:
                             log(f"  🔄 페이지 재로딩 및 탭 재선택... (시도 {retry_count + 1}/3)")
                             driver.get(MOLIT_URL)
-                            time.sleep(3)
+                            time.sleep(5)  # 페이지 완전 로딩 대기
                             try_accept_alert(driver, 2.0)
+                            remove_google_translate_popup(driver)
                             if select_property_tab(driver, property_type):
                                 tab_selected = True
                                 # 탭 선택 후 페이지가 완전히 준비될 때까지 대기
