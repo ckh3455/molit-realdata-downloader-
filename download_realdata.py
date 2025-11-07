@@ -36,7 +36,7 @@ except ModuleNotFoundError:
     subprocess.check_call([
         sys.executable, "-m", "pip", "install", "--upgrade",
         "numpy", "pandas", "openpyxl", "webdriver-manager",
-        "google-api-python-client", "google-auth", "python-dateutil"
+        "python-dateutil"
     ])
     import numpy as np  # type: ignore
     import pandas as pd  # type: ignore
@@ -512,8 +512,9 @@ def load_sa_credentials(sa_path: Path):
 
 
 def drive_upload_and_cleanup(creds, file_path: Path):
+    """공유드라이브 업로드 지원 (supportsAllDrives / includeItemsFromAllDrives 사용)"""
     if ARTIFACTS_ONLY or not creds or not DRIVE_FOLDER_ID:
-        debug("  - skip Drive upload (Artifacts mode).")
+        debug("  - skip Drive upload (Artifacts mode or missing creds/folder).")
         return
     try:
         from googleapiclient.discovery import build
@@ -522,14 +523,14 @@ def drive_upload_and_cleanup(creds, file_path: Path):
 
         media = MediaFileUpload(file_path.as_posix(), mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         meta = {"name": file_path.name, "parents": [DRIVE_FOLDER_ID]}
-        svc.files().create(body=meta, media_body=media, fields="id,name").execute()
+        svc.files().create(body=meta, media_body=media, fields="id,name", supportsAllDrives=True).execute()
         debug(f"  - uploaded to Drive: {file_path.name}")
 
         if DRIVE_RETENTION_DAYS > 0:
             from dateutil import parser as dtp
             cutoff = time.time() - DRIVE_RETENTION_DAYS * 86400
             q = f"'{DRIVE_FOLDER_ID}' in parents and trashed=false"
-            items = svc.files().list(q=q, fields="files(id,name,createdTime)").execute().get("files", [])
+            items = svc.files().list(q=q, fields="files(id,name,createdTime)", includeItemsFromAllDrives=True, supportsAllDrives=True).execute().get("files", [])
             for it in items:
                 try:
                     ts = dtp.parse(it.get("createdTime","")).timestamp()
