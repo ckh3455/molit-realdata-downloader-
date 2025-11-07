@@ -1315,12 +1315,13 @@ def wait_for_download(timeout: int = 15, baseline_files: set = None, expected_ye
                     time_diff = file_mtime - start_time
                     
                     # 파일이 다운로드 시작 후 30초 이내에 생성되었으면 우리가 요청한 파일로 간주
-                    if time_diff >= -5 and time_diff <= 30:
+                    # 10초 대기 전에 생성된 파일도 허용 (음수 시간 허용 범위 확대)
+                    if time_diff >= -10 and time_diff <= 30:
                         log(f"  ✅ 다운로드 완료: {latest.name} ({size:,} bytes, 생성: {time_diff:.1f}초 전)")
                         return latest
                     else:
-                        # 너무 오래된 파일이면 다른 파일일 수 있음
-                        if elapsed_int % 3 == 0:
+                        # 너무 오래된 파일이면 다른 파일일 수 있음 (로그 출력 빈도 줄이기)
+                        if elapsed_int % 5 == 0:
                             log(f"  ⚠️  파일 발견했지만 생성 시간이 이상함: {latest.name} (생성: {time_diff:.1f}초 전)")
                 else:
                     # 아직 크기가 변하는 중
@@ -1404,7 +1405,8 @@ def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, m
             uploader = get_uploader()
             if uploader.init_service():
                 # 덮어쓰기 모드로 업로드 (기존 파일이 있으면 업데이트)
-                uploader.upload_file(dest_path, filename, property_type, overwrite=True)
+                # drive_uploader.py의 upload_file 메서드가 기존 파일을 찾아서 업데이트하도록 구현되어 있어야 함
+                uploader.upload_file(dest_path, filename, property_type)
                 log(f"  ✅ Google Drive 업로드 완료")
             else:
                 log(f"  ⚠️  Google Drive 업로드 실패: 서비스 초기화 실패")
