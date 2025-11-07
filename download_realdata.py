@@ -313,11 +313,8 @@ def select_property_tab(driver, tab_name: str) -> bool:
         "공장창고등": "xlsTab8",
     }
     
-    # 첫 번째 시도 전에 탭 구조 확인 (디버깅)
-    if not hasattr(select_property_tab, '_inspected'):
-        log(f"  🔍 페이지 로드 후 탭 구조 확인 중...")
-        inspect_tabs_and_selectors(driver)
-        select_property_tab._inspected = True
+    # 선택자 확인은 처음 한 번만 (불필요한 디버깅 제거)
+    # inspect_tabs_and_selectors 호출 제거 - 매번 확인할 필요 없음
     
     # 방법 0: ID로 직접 찾기 (가장 확실한 방법)
     tab_id = TAB_ID_MAPPING.get(tab_name)
@@ -1336,9 +1333,7 @@ def wait_for_download(timeout: int = 15, baseline_files: set = None, expected_ye
     # 타임아웃
     log(f"  ⏱️  타임아웃 ({timeout}초)")
     
-    # Chrome DevTools Protocol로 브라우저 상태 디버깅
-    if driver:
-        debug_browser_state(driver)
+    # 불필요한 디버깅 제거 - 선택자는 이미 확인했으므로 매번 확인할 필요 없음
     
     # 디버깅: 새 파일이 있는지 확인
     all_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
@@ -1661,8 +1656,8 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
             log(f"  ⏳ 다운로드 시작 대기 중... (10초)")
             time.sleep(10.0)
             
-            # 10초 대기 후 baseline_files 업데이트 (10초 동안 생성된 파일 제외)
-            baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
+            # 10초 대기 후 baseline_files 업데이트하지 않음
+            # wait_for_download에서 이미 baseline_files를 사용하므로 업데이트하면 안 됨
         except Exception as e:
             if "NO_DATA_AVAILABLE" in str(e):
                 log(f"  ⏭️  데이터 없음, 스킵")
