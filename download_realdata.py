@@ -61,28 +61,46 @@ def ensure_subfolder(svc, parent_id: str, name: str):
     return f['id']
 
 def upload_processed(file_path: Path, prop_kind: str):
-    creds = load_sa()
+    """전처리된 파일을 종목별 하위 폴더에 덮어쓰기 업로드.
+    파일이 없거나 루트 폴더 ID/SA가 없으면 스킵하고 로그만 남김.
+    """
+    if not file_path.exists():
+        log(f"  - drive: skip (file not found): {file_path}")
+        return
+    if not DRIVE_ROOT_ID:
+        log("  - drive: skip (missing DRIVE_ROOT_ID/GDRIVE_FOLDER_ID)")
+        return
+    try:
+        creds = load_sa()
+    except Exception as e:
+        log(f"  - drive: skip (SA load error): {e}")
+        return
+
     svc = build('drive', 'v3', credentials=creds, cache_discovery=False)
     subfolder = FOLDER_MAP.get(prop_kind, prop_kind)
     folder_id = ensure_subfolder(svc, DRIVE_ROOT_ID, subfolder)
 
-    media = MediaFileUpload(file_path.as_posix(), mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     name = file_path.name
+    media = MediaFileUpload(
+        file_path.as_posix(),
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
 
     q = f"name='{name}' and '{folder_id}' in parents and trashed=false"
-    resp = svc.files().list(q=q, spaces='drive', fields='files(id,name)', supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+    resp = svc.files().list(
+        q=q, spaces='drive', fields='files(id,name)',
+        supportsAllDrives=True, includeItemsFromAllDrives=True
+    ).execute()
     files = resp.get('files', [])
+
+    log(f"  - drive target: {subfolder}/{name} (https://drive.google.com/drive/folders/{folder_id})")
 
     if files:
         fid = files[0]['id']
         svc.files().update(fileId=fid, media_body=media, supportsAllDrives=True).execute()
-        log(f"✅ 덮어쓰기 완료: {subfolder}/{name}")
+        log(f"  - drive: overwritten (update) → {subfolder}/{name}")
     else:
         meta = {'name': name, 'parents': [folder_id]}
         svc.files().create(body=meta, media_body=media, fields='id', supportsAllDrives=True).execute()
-        log(f"📤 신규 업로드: {subfolder}/{name}")
+        log(f"  - drive: uploaded (create) → {subfolder}/{name}")
 
-if __name__ == '__main__':
-    # 테스트 예시
-    sample = Path('output/아파트 202509.xlsx')
-    upload_processed(sample, '아파트')
