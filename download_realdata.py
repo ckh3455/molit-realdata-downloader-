@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-최근 3개월치 데이터 다운로드 및 전처리
-- 7개 탭의 최근 3개월치만 다운로드
-- 다운로드 후 자동 전처리
-- Google Drive 업로드
+국토부 실거래가 데이터 월별 대량 다운로드
+- 재시도 로직 (15초 대기, 최대 3회)
+- 진행 상황 저장 및 재개
+- 100회 제한 대응 (다음날 자동 재개)
+- 업데이트 모드 (최근 1년만 갱신)
+
+파일명: download_realdata.py
 """
 import os
 import re
 import sys
-import io
 import json
 import time
 import argparse
-import warnings
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Optional, Tuple, List
@@ -21,14 +22,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.alert import Alert
-from selenium.common.exceptions import UnexpectedAlertPresentException, StaleElementReferenceException
-import pandas as pd
-from openpyxl import Workbook
-from openpyxl.utils.dataframe import dataframe_to_rows
-from openpyxl.utils import get_column_letter
-
-# openpyxl 경고 억제
-warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+from selenium.common.exceptions import UnexpectedAlertPresentException
 
 # Google Drive 업로드 모듈
 try:
@@ -37,26 +31,24 @@ try:
 except ImportError:
     DRIVE_UPLOAD_ENABLED = False
 
-# Windows 콘솔 인코딩 설정
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-
 # ==================== 설정 ====================
-# CI 환경 감지 (GitHub Actions)
-IS_CI = os.getenv("CI", "") == "true" or os.getenv("GITHUB_ACTIONS", "") == "true"
+IS_CI = os.getenv("CI", "") == "1"
 
 # 저장 폴더 (환경에 따라 자동 전환)
 if IS_CI:
-    # GitHub Actions: 임시 output 폴더
+    # GitHub Actions: 테스트용 output 폴더
     DOWNLOAD_DIR = Path("output")
 else:
     # 로컬 PC: OneDrive 경로
     DOWNLOAD_DIR = Path(r"D:\OneDrive\office work\부동산 실거래 데이터")
 
+# 임시 다운로드 폴더
 TEMP_DOWNLOAD_DIR = Path("_temp_downloads")
+
+# 국토부 URL (엑셀 다운로드 페이지)
 MOLIT_URL = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
 
+# 부동산 종목 (7개)
 PROPERTY_TYPES = [
     "아파트",
     "연립다세대",
@@ -67,6 +59,29 @@ PROPERTY_TYPES = [
     "공장창고등"
 ]
 
+# 섹션별 시작 년도 (데이터가 존재하는 시점)
+SECTION_START_YEAR = {
+    "아파트": 2006,
+    "연립다세대": 2006,
+    "단독다가구": 2006,
+    "오피스텔": 2006,
+    "토지": 2006,
+    "상업업무용": 2006,
+    "공장창고등": 2006,
+}
+
+# 섹션별 시작 월 (데이터가 존재하는 시점, 기본값은 1월)
+SECTION_START_MONTH = {
+    "아파트": 1,
+    "연립다세대": 1,
+    "단독다가구": 1,
+    "오피스텔": 1,
+    "토지": 1,
+    "상업업무용": 1,
+    "공장창고등": 1,
+}
+
+# 실제 페이지의 탭 이름 매핑 (페이지에는 슬래시가 있음)
 TAB_NAME_MAPPING = {
     "아파트": "아파트",
     "연립다세대": "연립/다세대",
@@ -77,9 +92,11 @@ TAB_NAME_MAPPING = {
     "공장창고등": "공장/창고 등",
 }
 
+# 진행 상황 파일
+PROGRESS_FILE = Path("download_progress.json")
+
+# 임시 다운로드 폴더 생성
 TEMP_DOWNLOAD_DIR.mkdir(exist_ok=True)
-if IS_CI:
-    DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 def log(msg: str, end="\n"):
     """로그 출력"""
@@ -90,151 +107,11 @@ def sanitize_folder_name(name: str) -> str:
     """폴더명에서 특수문자 제거"""
     return re.sub(r'[<>:"/\\|?*]', '_', name)
 
-def get_recent_months(count: int = 3) -> list:
-    """최근 N개월 반환"""
-    today = date.today()
-    months = []
-    for i in range(count):
-        target_date = today - timedelta(days=30 * i)
-        months.append((target_date.year, target_date.month))
-    return months
-
-def preprocess_excel_file(file_path: Path) -> bool:
-    """엑셀 파일 전처리"""
-    try:
-        log(f"전처리 시작: {file_path.name}")
-        
-        # 전체 파일 읽기
-        df = pd.read_excel(file_path, header=None)
-        
-        # 이미 전처리된 파일인지 확인
-        first_row = df.iloc[0].astype(str).tolist() if len(df) > 0 else []
-        if '광역' in first_row or '계약년' in first_row:
-            log(f"이미 전처리된 파일: {file_path.name}")
-            return True
-        
-        # 1-12행 삭제
-        if len(df) > 12:
-            df = df.iloc[12:].reset_index(drop=True)
-        else:
-            return False
-        
-        # A열 삭제
-        if len(df.columns) > 0:
-            df = df.drop(df.columns[0], axis=1)
-            df.columns = range(len(df.columns))
-        
-        # 헤더 설정
-        if len(df) > 0:
-            header_row = df.iloc[0].tolist()
-            df.columns = header_row
-            df = df.iloc[1:].reset_index(drop=True)
-        
-        # 시군구 열 처리
-        if '시군구' in df.columns:
-            시군구_인덱스 = list(df.columns).index('시군구')
-            address_parts = df['시군구'].str.split(' ', expand=True)
-            
-            광역_데이터 = address_parts[0].fillna('').astype(str).replace('nan', '')
-            구_데이터 = address_parts[1].fillna('').astype(str).replace('nan', '') if address_parts.shape[1] >= 2 else pd.Series([''] * len(df), index=df.index, dtype=str)
-            법정동_데이터 = address_parts[2].fillna('').astype(str).replace('nan', '') if address_parts.shape[1] >= 3 else pd.Series([''] * len(df), index=df.index, dtype=str)
-            리_데이터 = address_parts[3].fillna('').astype(str).replace('nan', '').replace('None', '') if address_parts.shape[1] >= 4 else pd.Series([''] * len(df), index=df.index, dtype=str)
-            
-            df.insert(시군구_인덱스 + 1, '광역', 광역_데이터)
-            df.insert(시군구_인덱스 + 2, '구', 구_데이터)
-            df.insert(시군구_인덱스 + 3, '법정동', 법정동_데이터)
-            df.insert(시군구_인덱스 + 4, '리', 리_데이터)
-            df = df.drop('시군구', axis=1)
-        
-        # 계약년월 열 처리
-        if '계약년월' in df.columns:
-            계약년월_인덱스 = list(df.columns).index('계약년월')
-            df['계약년월'] = df['계약년월'].astype(str)
-            계약년_데이터 = df['계약년월'].str[:4].astype(str)
-            계약월_데이터 = df['계약년월'].str[4:6].astype(str)
-            
-            df.insert(계약년월_인덱스 + 1, '계약년', 계약년_데이터)
-            df.insert(계약년월_인덱스 + 2, '계약월', 계약월_데이터)
-            df = df.drop('계약년월', axis=1)
-        
-        # 열 순서 재배열
-        desired_order = [
-            '광역', '구', '법정동', '리', '번지', '본번', '부번', '단지명', 
-            '전용면적', '전용면적(㎡)', '거래금액', '거래금액(만원)',
-            '계약년', '계약월', '계약일', '동', '층', '매수자', '매도자', '건축년도', '도로명',
-            '해제사유발생일', '거래유형', '중개사소재지', '등기일자', '주택유형'
-        ]
-        
-        existing_columns = [col for col in desired_order if col in df.columns]
-        remaining_columns = [col for col in df.columns if col not in desired_order]
-        df = df[existing_columns + remaining_columns]
-        
-        # 파일 저장
-        df = df.fillna('')
-        if '리' in df.columns:
-            df['리'] = df['리'].astype(str).replace('nan', '').replace('None', '')
-        if '계약년' in df.columns:
-            df['계약년'] = df['계약년'].astype(str)
-        if '계약월' in df.columns:
-            df['계약월'] = df['계약월'].astype(str)
-        
-        # Excel 저장
-        wb = Workbook()
-        ws = wb.active
-        
-        for r in dataframe_to_rows(df, index=False, header=True):
-            ws.append(r)
-        
-        # 계약년, 계약월 텍스트 형식 설정
-        header_row = list(df.columns)
-        if '계약년' in header_row:
-            col_idx = header_row.index('계약년') + 1
-            col_letter = get_column_letter(col_idx)
-            for row in range(2, len(df) + 2):
-                ws[f'{col_letter}{row}'].number_format = '@'
-        if '계약월' in header_row:
-            col_idx = header_row.index('계약월') + 1
-            col_letter = get_column_letter(col_idx)
-            for row in range(2, len(df) + 2):
-                ws[f'{col_letter}{row}'].number_format = '@'
-        
-        # 열 너비 자동 조정
-        for idx, col_name in enumerate(header_row, start=1):
-            col_letter = get_column_letter(idx)
-            header_text = str(col_name)
-            header_length = sum(2 if ord(c) > 127 else 1 for c in header_text)
-            
-            col_data = df.iloc[:min(1000, len(df)), idx-1]
-            if len(col_data) > 0:
-                max_data_length = 0
-                for val in col_data.astype(str).head(1000):
-                    if pd.notna(val) and val != 'nan':
-                        val_length = sum(2 if ord(c) > 127 else 1 for c in str(val))
-                        max_data_length = max(max_data_length, val_length)
-            else:
-                max_data_length = 0
-            
-            max_length = max(header_length, max_data_length) + 3
-            adjusted_width = max(12, min(max_length, 60))
-            ws.column_dimensions[col_letter].width = adjusted_width
-        
-        wb.save(file_path)
-        wb.close()
-        
-        log(f"전처리 완료: {file_path.name}")
-        return True
-        
-    except Exception as e:
-        log(f"전처리 오류: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
 def build_driver():
-    """크롬 드라이버 생성"""
+    """크롬 드라이버 생성 (Chrome DevTools Protocol 활성화)"""
     opts = Options()
     # CI 환경 확인 (더 확실하게)
-    is_ci_env = os.getenv("CI") == "true" or os.getenv("GITHUB_ACTIONS") == "true"
+    is_ci_env = os.getenv("CI") == "1" or os.getenv("GITHUB_ACTIONS") == "true"
     
     # CI 환경이 아니면 무조건 브라우저 창 보이기
     if is_ci_env:
@@ -251,11 +128,15 @@ def build_driver():
     opts.add_argument("--disable-gpu")
     opts.add_argument("--lang=ko-KR")
     
-    # 로컬 실행 시 안정성 개선
+    # Chrome DevTools Protocol 활성화 (디버깅용)
+    # 로컬 환경에서만 디버깅 포트 활성화
     if not is_ci_env:
+        opts.add_argument("--remote-debugging-port=9222")
         opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option('useAutomationExtension', False)
+        log("🔧 Chrome DevTools Protocol 활성화 (포트 9222)")
+        log("   브라우저 상태 확인: http://localhost:9222")
     
     # 다운로드 설정
     prefs = {
@@ -348,6 +229,8 @@ def try_accept_alert(driver, timeout=3.0) -> bool:
             if "100건" in text or "100" in text:
                 alert.accept()
                 log(f"  ⛔ 일일 다운로드 100건 제한 도달!")
+                log(f"  💾 진행 상황이 저장되었습니다.")
+                log(f"  ⏰ 내일 다시 실행하면 이어서 진행됩니다.")
                 raise Exception("DOWNLOAD_LIMIT_100")
             
             # 데이터 없음 감지
@@ -398,6 +281,12 @@ def select_property_tab(driver, tab_name: str) -> bool:
         "공장창고등": "xlsTab8",
     }
     
+    # 첫 번째 시도 전에 탭 구조 확인 (디버깅)
+    if not hasattr(select_property_tab, '_inspected'):
+        log(f"  🔍 페이지 로드 후 탭 구조 확인 중...")
+        inspect_tabs_and_selectors(driver)
+        select_property_tab._inspected = True
+    
     # 방법 0: ID로 직접 찾기 (가장 확실한 방법)
     tab_id = TAB_ID_MAPPING.get(tab_name)
     if tab_id:
@@ -430,6 +319,35 @@ def select_property_tab(driver, tab_name: str) -> bool:
             if "on" in parent_class_after:
                 # 탭 선택 후 Google Translate 팝업 제거
                 remove_google_translate_popup(driver)
+                
+                # ✅ 추가: 페이지가 완전히 준비될 때까지 대기
+                log(f"  ⏳ 탭 선택 후 페이지 준비 대기 중...")
+                
+                # 날짜 입력 필드가 준비될 때까지 반복 확인 (최대 2초)
+                date_field_ready = False
+                for wait_attempt in range(2):  # 최대 2번 시도 (총 2초)
+                    try:
+                        date_field = driver.find_element(By.CSS_SELECTOR, "#srchBgnDe")
+                        if date_field.is_displayed() and date_field.is_enabled():
+                            # 추가 검증: 값이 설정 가능한지 확인
+                            try:
+                                driver.execute_script("arguments[0].value = '2024-01-01';", date_field)
+                                driver.execute_script("arguments[0].value = '';", date_field)
+                                date_field_ready = True
+                                log(f"  ✅ 페이지 준비 완료 ({wait_attempt + 1}번째 시도)")
+                                break
+                            except:
+                                pass
+                    except:
+                        pass
+                    time.sleep(1.0)
+                
+                if not date_field_ready:
+                    log(f"  ⚠️  날짜 입력 필드 확인 실패, 계속 진행...")
+                else:
+                    # 추가 안정화 대기 (폼이 완전히 초기화될 시간)
+                    time.sleep(1.0)
+                
                 log(f"  ✅ 탭 선택 완료 (ID): {tab_name}")
                 return True
             else:
@@ -443,6 +361,35 @@ def select_property_tab(driver, tab_name: str) -> bool:
                 if "on" in parent_class_after2:
                     # 탭 선택 후 Google Translate 팝업 제거
                     remove_google_translate_popup(driver)
+                    
+                    # ✅ 추가: 페이지가 완전히 준비될 때까지 대기
+                    log(f"  ⏳ 탭 선택 후 페이지 준비 대기 중...")
+                    
+                    # 날짜 입력 필드가 준비될 때까지 반복 확인 (최대 2초)
+                    date_field_ready = False
+                    for wait_attempt in range(2):  # 최대 2번 시도 (총 2초)
+                        try:
+                            date_field = driver.find_element(By.CSS_SELECTOR, "#srchBgnDe")
+                            if date_field.is_displayed() and date_field.is_enabled():
+                                # 추가 검증: 값이 설정 가능한지 확인
+                                try:
+                                    driver.execute_script("arguments[0].value = '2024-01-01';", date_field)
+                                    driver.execute_script("arguments[0].value = '';", date_field)
+                                    date_field_ready = True
+                                    log(f"  ✅ 페이지 준비 완료 ({wait_attempt + 1}번째 시도)")
+                                    break
+                                except:
+                                    pass
+                        except:
+                            pass
+                        time.sleep(1.0)
+                    
+                    if not date_field_ready:
+                        log(f"  ⚠️  날짜 입력 필드 확인 실패, 계속 진행...")
+                    else:
+                        # 추가 안정화 대기 (폼이 완전히 초기화될 시간)
+                        time.sleep(1.0)
+                    
                     log(f"  ✅ 탭 선택 완료 (ID, 재시도): {tab_name}")
                     return True
                 else:
@@ -529,7 +476,7 @@ def select_property_tab(driver, tab_name: str) -> bool:
             else:
                 continue
     
-    # 방법 3: 모든 링크를 찾아서 텍스트로 비교
+    # 방법 2: 모든 링크를 찾아서 텍스트로 비교
     try:
         log(f"  🔍 모든 링크 검색 중...")
         all_links = driver.find_elements(By.TAG_NAME, "a")
@@ -628,9 +575,15 @@ def select_property_tab(driver, tab_name: str) -> bool:
     except Exception as e:
         log(f"  ⚠️  링크 검색 실패: {e}")
     
-    # 방법 4: JavaScript로 찾기
+    # 방법 3: CSS 선택자로 시도
     try:
-        log(f"  🔍 JavaScript로 탭 찾기 시도...")
+        log(f"  🔍 CSS 선택자 시도...")
+        css_selectors = [
+            f"a:contains('{tab_name}')",  # 일부 브라우저에서만 작동
+            f"a[href*='{tab_name.lower()}']",
+        ]
+        
+        # CSS 선택자 대신 JavaScript로 찾기
         script = f"""
         var links = document.querySelectorAll('a');
         var targetTab = '{actual_tab_name}';
@@ -657,7 +610,10 @@ def select_property_tab(driver, tab_name: str) -> bool:
     except Exception as e:
         log(f"  ⚠️  JavaScript 클릭 실패: {e}")
     
+    # 모든 방법 실패 시 탭 구조 재확인
     log(f"  ❌ 탭 선택 실패: 모든 방법 시도 완료")
+    log(f"  🔍 실패 원인 분석을 위해 탭 구조 재확인 중...")
+    inspect_tabs_and_selectors(driver)
     return False
 
 def find_date_inputs(driver) -> Tuple[object, object]:
@@ -856,6 +812,8 @@ def click_excel_download(driver, baseline_files: set = None) -> bool:
             log(f"  ⚠️  JavaScript로 찾기/클릭 실패: {e}")
         
         # 방법 3: 버튼을 찾은 직후 바로 클릭 (StaleElementReferenceException 방지)
+        from selenium.common.exceptions import StaleElementReferenceException
+        
         # 여러 선택자로 시도
         selectors = [
             (By.CSS_SELECTOR, "button.ifdata-search-result"),
@@ -942,6 +900,10 @@ def click_excel_download(driver, baseline_files: set = None) -> bool:
         except Exception as e:
             log(f"  ⚠️  버튼 순회 실패: {e}")
         
+        # 모든 방법 실패 시 버튼 구조 재확인
+        log(f"  ❌ EXCEL 다운 버튼을 찾을 수 없습니다")
+        log(f"  🔍 실패 원인 분석을 위해 버튼 구조 재확인 중...")
+        inspect_tabs_and_selectors(driver)
         raise Exception("EXCEL 다운 버튼을 찾을 수 없습니다")
         
     except Exception as e:
@@ -954,7 +916,282 @@ def click_excel_download(driver, baseline_files: set = None) -> bool:
         traceback.print_exc()
         return False
 
-def wait_for_download(timeout: int = 15, baseline_files: set = None, expected_year: int = None, expected_month: int = None) -> Optional[Path]:
+def inspect_tabs_and_selectors(driver):
+    """Chrome DevTools를 이용하여 탭과 선택자 상세 확인"""
+    try:
+        log("  🔍 Chrome DevTools로 탭과 선택자 상세 분석 중...")
+        
+        # 탭 구조 상세 분석
+        tab_info = driver.execute_script("""
+            var tabs = [];
+            var tabContainers = document.querySelectorAll('ul.quarter-tab-cover, .quarter-tab-cover, [class*="tab"]');
+            
+            // 모든 링크 찾기
+            var allLinks = document.querySelectorAll('a');
+            for (var i = 0; i < allLinks.length; i++) {
+                var link = allLinks[i];
+                var text = link.textContent.trim();
+                var id = link.id || '';
+                var href = link.href || '';
+                var className = link.className || '';
+                var parent = link.parentElement;
+                var parentClass = parent ? parent.className || '' : '';
+                var parentId = parent ? parent.id || '' : '';
+                
+                // 탭 관련 링크만 필터링
+                if (text && (text.includes('아파트') || text.includes('연립') || text.includes('다세대') || 
+                    text.includes('단독') || text.includes('다가구') || text.includes('오피스텔') || 
+                    text.includes('토지') || text.includes('상업') || text.includes('업무') || 
+                    text.includes('공장') || text.includes('창고') || 
+                    id.includes('Tab') || className.includes('tab') || parentClass.includes('tab'))) {
+                    tabs.push({
+                        text: text,
+                        id: id,
+                        href: href,
+                        className: className,
+                        parentClass: parentClass,
+                        parentId: parentId,
+                        visible: link.offsetParent !== null,
+                        enabled: !link.disabled,
+                        onclick: link.onclick ? link.onclick.toString().substring(0, 100) : null,
+                        xpath: getXPath(link)
+                    });
+                }
+            }
+            
+            // XPath 계산 함수
+            function getXPath(element) {
+                if (element.id !== '') {
+                    return '//*[@id="' + element.id + '"]';
+                }
+                if (element === document.body) {
+                    return '/html/body';
+                }
+                var ix = 0;
+                var siblings = element.parentNode.childNodes;
+                for (var i = 0; i < siblings.length; i++) {
+                    var sibling = siblings[i];
+                    if (sibling === element) {
+                        return getXPath(element.parentNode) + '/' + element.tagName.toLowerCase() + '[' + (ix + 1) + ']';
+                    }
+                    if (sibling.nodeType === 1 && sibling.tagName === element.tagName) {
+                        ix++;
+                    }
+                }
+            }
+            
+            return {
+                tabs: tabs,
+                tabContainers: Array.from(tabContainers).map(container => ({
+                    tagName: container.tagName,
+                    id: container.id || '',
+                    className: container.className || '',
+                    childrenCount: container.children.length
+                }))
+            };
+        """)
+        
+        log(f"  📋 탭 구조 분석 결과:")
+        log(f"     탭 컨테이너: {len(tab_info.get('tabContainers', []))}개")
+        for container in tab_info.get('tabContainers', []):
+            log(f"       - {container.get('tagName')} (id: {container.get('id')}, class: {container.get('className')}, 자식: {container.get('childrenCount')}개)")
+        
+        tabs = tab_info.get('tabs', [])
+        log(f"     발견된 탭 링크: {len(tabs)}개")
+        for idx, tab in enumerate(tabs, 1):
+            log(f"     [{idx}] '{tab.get('text')}'")
+            log(f"         ID: {tab.get('id') or '(없음)'}")
+            log(f"         Class: {tab.get('className') or '(없음)'}")
+            log(f"         부모 Class: {tab.get('parentClass') or '(없음)'}")
+            log(f"         부모 ID: {tab.get('parentId') or '(없음)'}")
+            log(f"         표시: {tab.get('visible')}, 활성: {tab.get('enabled')}")
+            log(f"         XPath: {tab.get('xpath', 'N/A')}")
+        
+        # 버튼 구조 상세 분석
+        button_info = driver.execute_script("""
+            var buttons = [];
+            var allButtons = document.querySelectorAll('button');
+            
+            for (var i = 0; i < allButtons.length; i++) {
+                var btn = allButtons[i];
+                var text = btn.textContent.trim();
+                
+                // EXCEL 다운 관련 버튼만
+                if (text.includes('EXCEL') || text.includes('다운') || 
+                    btn.className.includes('search-result') || 
+                    (btn.onclick && btn.onclick.toString().includes('Excel'))) {
+                    buttons.push({
+                        text: text,
+                        id: btn.id || '',
+                        className: btn.className || '',
+                        onclick: btn.onclick ? btn.onclick.toString().substring(0, 150) : null,
+                        visible: btn.offsetParent !== null,
+                        enabled: !btn.disabled,
+                        xpath: getXPath(btn)
+                    });
+                }
+            }
+            
+            function getXPath(element) {
+                if (element.id !== '') {
+                    return '//*[@id="' + element.id + '"]';
+                }
+                if (element === document.body) {
+                    return '/html/body';
+                }
+                var ix = 0;
+                var siblings = element.parentNode.childNodes;
+                for (var i = 0; i < siblings.length; i++) {
+                    var sibling = siblings[i];
+                    if (sibling === element) {
+                        return getXPath(element.parentNode) + '/' + element.tagName.toLowerCase() + '[' + (ix + 1) + ']';
+                    }
+                    if (sibling.nodeType === 1 && sibling.tagName === element.tagName) {
+                        ix++;
+                    }
+                }
+            }
+            
+            return buttons;
+        """)
+        
+        log(f"  🔘 EXCEL 다운 버튼 분석 결과:")
+        log(f"     발견된 버튼: {len(button_info)}개")
+        for idx, btn in enumerate(button_info, 1):
+            log(f"     [{idx}] '{btn.get('text')}'")
+            log(f"         ID: {btn.get('id') or '(없음)'}")
+            log(f"         Class: {btn.get('className') or '(없음)'}")
+            log(f"         표시: {btn.get('visible')}, 활성: {btn.get('enabled')}")
+            log(f"         onclick: {btn.get('onclick', 'N/A')[:100] if btn.get('onclick') else '(없음)'}")
+            log(f"         XPath: {btn.get('xpath', 'N/A')}")
+        
+        # 현재 사용 중인 선택자 검증
+        log(f"  ✅ 현재 코드의 선택자 검증:")
+        
+        # 탭 ID 매핑 검증
+        TAB_ID_MAPPING = {
+            "아파트": "xlsTab1",
+            "연립다세대": "xlsTab2",
+            "단독다가구": "xlsTab3",
+            "오피스텔": "xlsTab4",
+            "상업업무용": "xlsTab6",
+            "토지": "xlsTab7",
+            "공장창고등": "xlsTab8",
+        }
+        
+        for tab_name, expected_id in TAB_ID_MAPPING.items():
+            found = False
+            for tab in tabs:
+                if tab.get('id') == expected_id:
+                    found = True
+                    log(f"     ✅ {tab_name}: ID '{expected_id}' 발견됨")
+                    break
+            if not found:
+                log(f"     ❌ {tab_name}: ID '{expected_id}' 없음")
+        
+        # 버튼 선택자 검증
+        button_selectors = [
+            "button.ifdata-search-result",
+            "//button[@class='ifdata-search-result' and normalize-space(text())='EXCEL 다운']",
+            "//button[contains(@onclick, 'fnExcelDown')]",
+        ]
+        
+        for selector in button_selectors:
+            try:
+                if selector.startswith('//'):
+                    # XPath
+                    elements = driver.find_elements(By.XPATH, selector)
+                else:
+                    # CSS
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                
+                if elements:
+                    log(f"     ✅ 선택자 '{selector}': {len(elements)}개 발견")
+                else:
+                    log(f"     ❌ 선택자 '{selector}': 없음")
+            except Exception as e:
+                log(f"     ⚠️  선택자 '{selector}': 오류 - {e}")
+        
+    except Exception as e:
+        log(f"  ⚠️  탭/선택자 분석 실패: {e}")
+        import traceback
+        traceback.print_exc()
+
+def debug_browser_state(driver):
+    """Chrome DevTools Protocol을 사용하여 브라우저 상태 디버깅"""
+    try:
+        # CDP 명령 사용 가능 여부 확인
+        if hasattr(driver, 'execute_cdp_cmd'):
+            log("  🔍 Chrome DevTools Protocol로 브라우저 상태 확인 중...")
+            
+            # 탭과 선택자 상세 분석
+            inspect_tabs_and_selectors(driver)
+            
+            # 1. 콘솔 로그 확인
+            try:
+                logs = driver.get_log('browser')
+                if logs:
+                    log(f"  📋 브라우저 콘솔 로그 ({len(logs)}개):")
+                    for log_entry in logs[-10:]:  # 최근 10개만
+                        log(f"     [{log_entry['level']}] {log_entry['message']}")
+                else:
+                    log("  📋 브라우저 콘솔 로그: 없음")
+            except Exception as e:
+                log(f"  ⚠️  콘솔 로그 확인 실패: {e}")
+            
+            # 2. 네트워크 요청 확인
+            try:
+                # Performance.getMetrics로 네트워크 상태 확인
+                metrics = driver.execute_cdp_cmd('Performance.getMetrics', {})
+                if metrics:
+                    log(f"  🌐 성능 메트릭: {metrics}")
+            except Exception as e:
+                pass
+            
+            # 3. 현재 페이지 상태 확인
+            try:
+                page_state = driver.execute_script("""
+                    return {
+                        readyState: document.readyState,
+                        url: window.location.href,
+                        title: document.title,
+                        hasFnExcelDown: typeof fnExcelDown === 'function',
+                        buttons: Array.from(document.querySelectorAll('button')).map(b => ({
+                            text: b.textContent.trim(),
+                            visible: b.offsetParent !== null,
+                            enabled: !b.disabled,
+                            onclick: b.onclick ? b.onclick.toString() : null
+                        }))
+                    };
+                """)
+                log(f"  📄 페이지 상태:")
+                log(f"     URL: {page_state.get('url', 'N/A')}")
+                log(f"     ReadyState: {page_state.get('readyState', 'N/A')}")
+                log(f"     fnExcelDown 함수 존재: {page_state.get('hasFnExcelDown', False)}")
+                buttons = page_state.get('buttons', [])
+                excel_buttons = [b for b in buttons if 'EXCEL' in b.get('text', '').upper() or '다운' in b.get('text', '')]
+                if excel_buttons:
+                    log(f"     EXCEL 다운 버튼 ({len(excel_buttons)}개):")
+                    for btn in excel_buttons:
+                        log(f"       - 텍스트: '{btn.get('text')}', 표시: {btn.get('visible')}, 활성: {btn.get('enabled')}")
+                else:
+                    log(f"     EXCEL 다운 버튼: 없음")
+            except Exception as e:
+                log(f"  ⚠️  페이지 상태 확인 실패: {e}")
+            
+            # 4. 다운로드 설정 확인
+            try:
+                download_path = driver.execute_cdp_cmd('Browser.getDownloadPaths', {})
+                log(f"  📥 다운로드 경로: {download_path}")
+            except Exception as e:
+                pass
+            
+        else:
+            log("  ⚠️  Chrome DevTools Protocol을 사용할 수 없습니다 (Selenium 버전 확인 필요)")
+    except Exception as e:
+        log(f"  ⚠️  브라우저 상태 디버깅 실패: {e}")
+
+def wait_for_download(timeout: int = 15, baseline_files: set = None, expected_year: int = None, expected_month: int = None, driver=None) -> Optional[Path]:
     """다운로드 완료 대기 - 개선된 감지 로직 (즉시 감지 시작)"""
     start_time = time.time()
     
@@ -1001,7 +1238,8 @@ def wait_for_download(timeout: int = 15, baseline_files: set = None, expected_ye
             # 가장 최근 .crdownload 파일
             latest_crdownload = max(crdownloads, key=lambda p: p.stat().st_mtime)
             size = latest_crdownload.stat().st_size
-            if elapsed_int % 2 == 0 and elapsed_int > 0:
+            # 로그 출력 빈도 줄이기: 5초마다만 출력
+            if elapsed_int > 0 and elapsed_int % 5 == 0:
                 log(f"  ⏳ 다운로드 진행중... ({elapsed_int}초, {size:,} bytes)")
             continue
         
@@ -1054,15 +1292,21 @@ def wait_for_download(timeout: int = 15, baseline_files: set = None, expected_ye
                     if elapsed_int % 2 == 0:
                         log(f"  📝 파일 쓰기 중... ({size:,} bytes, 안정화 대기: {stable_count.get(file_key, 0)}/3)")
         
-        # 다운로드가 시작되지 않았을 때 경고 메시지 (한 번만)
-        if not found_any_file and elapsed_int >= 3 and not no_file_warning_shown:
-            log(f"  ⚠️  다운로드가 시작되지 않은 것 같습니다. ({elapsed_int}초 경과)")
+        # 다운로드가 시작되지 않았을 때 경고 메시지 (한 번만) - 10초 후에만 표시
+        # elapsed는 실수이므로 10.0 이상일 때만 경고
+        if not found_any_file and elapsed >= 10.0 and not no_file_warning_shown:
+            elapsed_rounded = round(elapsed, 1)
+            log(f"  ⚠️  다운로드가 시작되지 않은 것 같습니다. ({elapsed_rounded}초 경과)")
             log(f"     - 다운로드 폴더 확인: {TEMP_DOWNLOAD_DIR.absolute()}")
             log(f"     - 브라우저의 다운로드 설정을 확인하세요")
             no_file_warning_shown = True
     
     # 타임아웃
     log(f"  ⏱️  타임아웃 ({timeout}초)")
+    
+    # Chrome DevTools Protocol로 브라우저 상태 디버깅
+    if driver:
+        debug_browser_state(driver)
     
     # 디버깅: 새 파일이 있는지 확인
     all_files = list(TEMP_DOWNLOAD_DIR.glob("*"))
@@ -1085,7 +1329,188 @@ def wait_for_download(timeout: int = 15, baseline_files: set = None, expected_ye
     
     return None
 
-def download_single_month_with_retry(driver, property_type: str, start_date: date, end_date: date, max_retries: int = 3) -> Optional[Path]:
+def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, month: int) -> Path:
+    """다운로드 파일을 목적지로 이동 및 이름 변경"""
+    # 폴더 생성
+    folder_name = sanitize_folder_name(property_type)
+    dest_dir = DOWNLOAD_DIR / folder_name
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 파일명: 아파트 200601.xlsx
+    filename = f"{property_type} {year:04d}{month:02d}.xlsx"
+    dest_path = dest_dir / filename
+    
+    # 이동
+    downloaded_file.rename(dest_path)
+    log(f"  📁 저장: {dest_path}")
+    
+    # Google Drive 업로드
+    if DRIVE_UPLOAD_ENABLED:
+        try:
+            log(f"  ☁️  Google Drive 업로드 중...")
+            uploader = get_uploader()
+            if uploader.init_service():
+                uploader.upload_file(dest_path, filename, property_type)
+                log(f"  ✅ Google Drive 업로드 완료")
+            else:
+                log(f"  ⚠️  Google Drive 업로드 실패: 서비스 초기화 실패")
+        except Exception as e:
+            log(f"  ⚠️  Google Drive 업로드 실패: {e}")
+    
+    return dest_path
+
+def generate_monthly_dates(start_year: int = 2006, start_month: int = 1) -> List[Tuple[date, date]]:
+    """2006년 1월부터 현재까지 월별 (시작일, 종료일) 생성"""
+    today = date.today()
+    current = date(start_year, start_month, 1)
+    dates = []
+    
+    while current <= today:
+        # 해당 월의 마지막 날
+        if current.month == 12:
+            next_month = date(current.year + 1, 1, 1)
+        else:
+            next_month = date(current.year, current.month + 1, 1)
+        
+        last_day = next_month - timedelta(days=1)
+        
+        # 현재 달이면 오늘까지만
+        if current.year == today.year and current.month == today.month:
+            last_day = today
+        
+        dates.append((current, last_day))
+        
+        # 다음 달로
+        current = next_month
+    
+    return dates
+
+def load_progress() -> dict:
+    """진행 상황 로드"""
+    # 먼저 로컬 파일 확인
+    if PROGRESS_FILE.exists():
+        with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+            progress = json.load(f)
+            # 비어있지 않으면 사용
+            if progress:
+                return progress
+    
+    # 로컬 파일이 없거나 비어있으면 Google Drive에서 확인
+    if DRIVE_UPLOAD_ENABLED:
+        try:
+            log("📂 Google Drive에서 진행 상황 확인 중...")
+            uploader = get_uploader()
+            if uploader.init_service():
+                progress = {}
+                today = date.today()
+                
+                for property_type in PROPERTY_TYPES:
+                    prop_key = sanitize_folder_name(property_type)
+                    
+                    # 모든 파일의 년월 확인
+                    all_months = uploader.get_all_file_months(property_type)
+                    
+                    if not all_months:
+                        log(f"  ℹ️  {property_type}: 파일 없음 (처음 시작)")
+                        continue
+                    
+                    # 섹션별 시작 년도/월부터 현재까지 빠진 파일 찾기
+                    section_start_year = SECTION_START_YEAR.get(property_type, 2006)
+                    section_start_month = SECTION_START_MONTH.get(property_type, 1)
+                    expected_months = set()
+                    current = date(section_start_year, section_start_month, 1)
+                    while current <= today:
+                        expected_months.add((current.year, current.month))
+                        if current.month == 12:
+                            current = date(current.year + 1, 1, 1)
+                        else:
+                            current = date(current.year, current.month + 1, 1)
+                    
+                    missing_months = expected_months - all_months
+                    
+                    if missing_months:
+                        # 빠진 파일이 있으면 가장 오래된 빠진 파일부터 시작
+                        oldest_missing = min(missing_months)
+                        last_year, last_month = oldest_missing
+                        # 가장 오래된 빠진 파일의 이전 달까지 완료된 것으로 표시
+                        if last_month == 1:
+                            completed_year = last_year - 1
+                            completed_month = 12
+                        else:
+                            completed_year = last_year
+                            completed_month = last_month - 1
+                        month_key = f"{completed_year:04d}{completed_month:02d}"
+                        progress[prop_key] = {
+                            "last_month": month_key,
+                            "last_update": datetime.now().isoformat(),
+                            "missing_count": len(missing_months)
+                        }
+                        log(f"  ⚠️  {property_type}: {month_key}까지 완료, {len(missing_months)}개 파일 누락 ({oldest_missing[0]:04d}-{oldest_missing[1]:02d}부터 필요)")
+                    else:
+                        # 모든 파일이 있으면 가장 최근 파일
+                        last_year, last_month = max(all_months)
+                        month_key = f"{last_year:04d}{last_month:02d}"
+                        progress[prop_key] = {
+                            "last_month": month_key,
+                            "last_update": datetime.now().isoformat()
+                        }
+                        log(f"  ✅ {property_type}: {month_key}까지 완료 (모든 파일 존재)")
+                
+                if progress:
+                    # 로컬에도 저장
+                    save_progress(progress)
+                    log("💾 진행 상황을 로컬 파일에 저장했습니다.")
+                    return progress
+        except Exception as e:
+            log(f"⚠️  Google Drive 확인 실패: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    return {}
+
+def save_progress(progress: dict):
+    """진행 상황 저장"""
+    with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
+        json.dump(progress, f, indent=2, ensure_ascii=False)
+
+def is_already_downloaded(property_type: str, year: int, month: int) -> bool:
+    """이미 다운로드된 파일인지 확인"""
+    folder_name = sanitize_folder_name(property_type)
+    filename = f"{property_type} {year:04d}{month:02d}.xlsx"
+    dest_path = DOWNLOAD_DIR / folder_name / filename
+    
+    # 로컬 확인
+    if dest_path.exists():
+        return True
+    
+    # Google Drive 확인
+    if DRIVE_UPLOAD_ENABLED:
+        try:
+            uploader = get_uploader()
+            if uploader.init_service():
+                if uploader.check_file_exists(filename, property_type):
+                    return True
+        except:
+            pass
+    
+    return False
+
+def check_if_all_historical_complete(progress: dict) -> bool:
+    """모든 과거 데이터가 완료되었는지 확인 (2006-01 ~ 작년 12월)"""
+    last_year = date.today().year - 1
+    last_historical_month = f"{last_year}12"
+    
+    for prop in PROPERTY_TYPES:
+        prop_key = sanitize_folder_name(prop)
+        last_month = progress.get(prop_key, {}).get("last_month", "")
+        
+        # 작년 12월까지 완료되지 않았으면 False
+        if not last_month or last_month < last_historical_month:
+            return False
+    
+    return True
+
+def download_single_month_with_retry(driver, property_type: str, start_date: date, end_date: date, max_retries: int = 3) -> bool:
     """단일 월 다운로드 - 재시도 포함"""
     year = start_date.year
     month = start_date.month
@@ -1093,6 +1518,11 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
     log(f"\n{'='*60}")
     log(f"📅 {property_type} {year}년 {month}월")
     log(f"{'='*60}")
+    
+    # 이미 다운로드됨?
+    if is_already_downloaded(property_type, year, month):
+        log(f"  ⏭️  이미 존재함, 스킵")
+        return True
     
     # temp 폴더 정리 (이전 실패 파일 제거)
     try:
@@ -1132,7 +1562,7 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
                 log(f"  ⏳ 5초 대기 후 재시도...")
                 time.sleep(5)
                 continue
-            return None
+            return False
         
         # 날짜 설정 후 Alert 확인 (데이터 없음 체크)
         try:
@@ -1140,7 +1570,7 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
         except Exception as e:
             if "NO_DATA_AVAILABLE" in str(e):
                 log(f"  ⏭️  데이터 없음, 스킵")
-                return None  # 데이터 없음은 None 반환
+                return True  # 데이터 없음은 정상적인 경우로 처리
             elif "DOWNLOAD_LIMIT_100" in str(e):
                 raise  # 100건 제한은 상위로 전달
         
@@ -1157,129 +1587,191 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
         try:
             if not click_excel_download(driver, baseline_files=baseline_files):
                 if attempt < max_retries:
+                    # 재시도 전 페이지 새로고침
+                    log(f"  🔄 페이지 새로고침 중...")
+                    driver.get(MOLIT_URL)
+                    time.sleep(3)
+                    try_accept_alert(driver, 2.0)
+                    # 탭 재선택
+                    if not select_property_tab(driver, property_type):
+                        log(f"  ⚠️  탭 재선택 실패")
                     log(f"  ⏳ 5초 대기 후 재시도...")
                     time.sleep(5)
                     continue
-                return None
+                return False
+            
+            # ✅ 추가: 다운로드 버튼 클릭 후 다운로드 시작 대기 (10초)
+            log(f"  ⏳ 다운로드 시작 대기 중... (10초)")
+            time.sleep(10.0)
+            
+            # 10초 대기 후 baseline_files 업데이트 (10초 동안 생성된 파일 제외)
+            baseline_files = set(TEMP_DOWNLOAD_DIR.glob("*"))
         except Exception as e:
             if "NO_DATA_AVAILABLE" in str(e):
                 log(f"  ⏭️  데이터 없음, 스킵")
-                return None  # 데이터 없음은 None 반환
+                return True  # 데이터 없음은 정상적인 경우로 처리
             elif "DOWNLOAD_LIMIT_100" in str(e):
                 raise  # 100건 제한은 상위로 전달
             if attempt < max_retries:
+                # 재시도 전 페이지 새로고침
+                log(f"  🔄 페이지 새로고침 중...")
+                driver.get(MOLIT_URL)
+                time.sleep(3)
+                try_accept_alert(driver, 2.0)
+                # 탭 재선택
+                if not select_property_tab(driver, property_type):
+                    log(f"  ⚠️  탭 재선택 실패")
                 log(f"  ⏳ 5초 대기 후 재시도...")
                 time.sleep(5)
                 continue
-            return None
+            return False
         
         # 다운로드 대기 (15초 - 서버 응답 지연 및 파일 생성 시간 고려)
         # 다운로드 버튼 클릭 직후이므로 즉시 감지 시작
-        downloaded = wait_for_download(timeout=15, baseline_files=baseline_files, expected_year=year, expected_month=month)
+        downloaded = wait_for_download(timeout=15, baseline_files=baseline_files, expected_year=year, expected_month=month, driver=driver)
         
         if downloaded:
-            # 성공! 파일 반환
-            return downloaded
+            # 성공! 이동 및 이름 변경
+            try:
+                move_and_rename_file(downloaded, property_type, year, month)
+                
+                # 다운로드 성공 후 temp 폴더 정리 (남은 임시 파일 제거)
+                try:
+                    for temp_file in TEMP_DOWNLOAD_DIR.glob("*"):
+                        try:
+                            if temp_file.is_file():
+                                temp_file.unlink()
+                        except:
+                            pass
+                except:
+                    pass
+                
+                # 다운로드 성공 후 간단한 대기 (다음 다운로드를 위한 준비)
+                # 페이지 재로드는 main 함수에서 처리
+                time.sleep(1.0)
+                
+                return True
+            except Exception as e:
+                log(f"  ❌ 파일 이동 실패: {e}")
+                if attempt < max_retries:
+                    # 재시도 전 페이지 새로고침
+                    log(f"  🔄 페이지 새로고침 중...")
+                    driver.get(MOLIT_URL)
+                    time.sleep(3)
+                    try_accept_alert(driver, 2.0)
+                    # 탭 재선택
+                    if not select_property_tab(driver, property_type):
+                        log(f"  ⚠️  탭 재선택 실패")
+                    log(f"  ⏳ 5초 대기 후 재시도...")
+                    time.sleep(5)
+                    continue
+                return False
         else:
             # 실패
             if attempt < max_retries:
+                # 재시도 전 페이지 새로고침
+                log(f"  🔄 페이지 새로고침 중...")
+                driver.get(MOLIT_URL)
+                time.sleep(3)
+                try_accept_alert(driver, 2.0)
+                # 탭 재선택
+                if not select_property_tab(driver, property_type):
+                    log(f"  ⚠️  탭 재선택 실패")
                 log(f"  ⏳ 5초 대기 후 재시도...")
                 time.sleep(5)
             else:
                 log(f"  ❌ {max_retries}회 시도 모두 실패")
-                return None
+                return False
     
-    return None
-
-def move_and_rename_file(downloaded_file: Path, property_type: str, year: int, month: int) -> Path:
-    """다운로드 파일을 목적지로 이동 및 이름 변경, 전처리 후 저장"""
-    # 폴더 생성
-    folder_name = sanitize_folder_name(property_type)
-    dest_dir = DOWNLOAD_DIR / folder_name
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 파일명: 아파트 200601.xlsx
-    filename = f"{property_type} {year:04d}{month:02d}.xlsx"
-    dest_path = dest_dir / filename
-    
-    # CI 환경에서는 임시 파일로 전처리 후 Google Drive에 업로드
-    if IS_CI:
-        # 임시 파일로 전처리
-        temp_processed = TEMP_DOWNLOAD_DIR / filename
-        downloaded_file.rename(temp_processed)
-        
-        # 전처리
-        if not preprocess_excel_file(temp_processed):
-            log(f"전처리 실패: {temp_processed.name}")
-            return None
-        
-        # Google Drive 업로드
-        if DRIVE_UPLOAD_ENABLED:
-            try:
-                log(f"  ☁️  Google Drive 업로드 중...")
-                uploader = get_uploader()
-                if uploader.init_service():
-                    uploader.upload_file(temp_processed, filename, property_type)
-                    log(f"  ✅ Google Drive 업로드 완료")
-                else:
-                    log(f"  ⚠️  Google Drive 업로드 실패: 서비스 초기화 실패")
-            except Exception as e:
-                log(f"  ⚠️  Google Drive 업로드 실패: {e}")
-        
-        # 임시 파일 삭제
-        try:
-            temp_processed.unlink()
-        except:
-            pass
-        
-        return None
-    else:
-        # 로컬 환경: 파일 이동 (덮어쓰기)
-        if dest_path.exists():
-            dest_path.unlink()
-        downloaded_file.rename(dest_path)
-        log(f"  📁 저장: {dest_path}")
-        
-        # 전처리
-        if not preprocess_excel_file(dest_path):
-            log(f"전처리 실패: {dest_path.name}")
-            return None
-        
-        # Google Drive 업로드
-        if DRIVE_UPLOAD_ENABLED:
-            try:
-                log(f"  ☁️  Google Drive 업로드 중...")
-                uploader = get_uploader()
-                if uploader.init_service():
-                    uploader.upload_file(dest_path, filename, property_type)
-                    log(f"  ✅ Google Drive 업로드 완료")
-                else:
-                    log(f"  ⚠️  Google Drive 업로드 실패: 서비스 초기화 실패")
-            except Exception as e:
-                log(f"  ⚠️  Google Drive 업로드 실패: {e}")
-        
-        return dest_path
+    return False
 
 def main():
     """메인 함수"""
-    parser = argparse.ArgumentParser(description='최근 3개월치 부동산 실거래 데이터 다운로드 및 전처리')
-    parser.add_argument('--update-mode', action='store_true', 
-                       help='업데이트 모드 (최근 3개월치만 다운로드)')
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test-mode", action="store_true", help="테스트 모드")
+    parser.add_argument("--max-months", type=int, default=2, help="테스트 모드에서 최대 다운로드 개월 수")
+    parser.add_argument("--update-mode", action="store_true", help="업데이트 모드 (최근 1년만)")
     args = parser.parse_args()
     
     log("="*70)
-    log("🚀 최근 3개월치 데이터 다운로드 및 전처리 시작")
-    if args.update_mode:
-        log("모드: --update-mode (최근 3개월치만 다운로드)")
-    if IS_CI:
-        log("환경: GitHub Actions (CI)")
-    else:
-        log("환경: 로컬 PC")
+    log("🚀 국토부 실거래가 데이터 다운로드")
     log("="*70)
+    log(f"🖥️  실행 환경: {'GitHub Actions (CI)' if IS_CI else '로컬 PC'}")
+    log(f"📂 저장 경로: {DOWNLOAD_DIR}")
+    log(f"📊 종목 수: {len(PROPERTY_TYPES)}")
+    if args.test_mode:
+        log(f"🧪 테스트 모드: 최근 {args.max_months}개월")
+    log("")
     
-    # 최근 3개월 계산
-    recent_months = get_recent_months(3)
-    log(f"다운로드 대상: 최근 3개월 ({recent_months})")
+    # 진행 상황 로드
+    progress = load_progress()
+    
+    # 다운로드가 필요한 섹션 확인 (2006-01부터 현재까지 완료 여부)
+    today = date.today()
+    target_month_key = f"{today.year:04d}{today.month:02d}"
+    properties_to_download = []
+    
+    log("📋 각 섹션별 완료 상태 확인 중...")
+    for property_type in PROPERTY_TYPES:
+        prop_key = sanitize_folder_name(property_type)
+        last_completed = progress.get(prop_key, {}).get("last_month", "")
+        
+        if not last_completed:
+            # 파일이 하나도 없으면 2006-01부터 다운로드 필요
+            properties_to_download.append(property_type)
+            log(f"  ⬇️  {property_type}: 파일 없음 → 2006-01부터 다운로드 필요")
+        elif last_completed < target_month_key:
+            # 2006-01부터 현재까지 완료되지 않았으면 다운로드 필요
+            properties_to_download.append(property_type)
+            log(f"  ⬇️  {property_type}: {last_completed}까지 완료 → {target_month_key}까지 필요 (2006-01부터)")
+        else:
+            # 2006-01부터 현재까지 모두 완료되었으면 스킵
+            log(f"  ✅ {property_type}: {last_completed}까지 완료 → 스킵")
+    
+    log("")
+    
+    # 모드 결정
+    if args.update_mode:
+        # 강제 업데이트 모드이지만, 파일이 없는 섹션이 있으면 전체 다운로드
+        if not properties_to_download:
+            # 모든 섹션이 완료되었으면 업데이트 모드
+            update_mode = True
+            log("🔄 강제 업데이트 모드: 최근 1년치만 갱신")
+            properties_to_download = PROPERTY_TYPES  # 모든 섹션 처리
+        else:
+            # 파일이 없는 섹션이 있으면 전체 다운로드 모드
+            update_mode = False
+            log(f"📥 전체 다운로드 모드: {len(properties_to_download)}개 섹션 (2006-01부터)")
+    elif not properties_to_download:
+        # 모든 섹션이 완료되었으면 업데이트 모드로 전환
+        update_mode = True
+        log("✅ 모든 섹션이 2006-01부터 현재까지 완료되었습니다!")
+        log("🔄 업데이트 모드로 전환: 최근 1년치만 갱신")
+        properties_to_download = PROPERTY_TYPES  # 모든 섹션을 업데이트 모드로 처리
+    else:
+        # 완료되지 않은 섹션이 있으면 전체 다운로드 모드
+        update_mode = False
+        log(f"📥 전체 다운로드 모드: {len(properties_to_download)}개 섹션 (2006-01부터)")
+    
+    log("")
+    
+    # 날짜 범위 생성
+    if update_mode:
+        # 최근 1년 (13개월 - 여유있게)
+        start_year = today.year - 1
+        start_month = today.month
+        monthly_dates = generate_monthly_dates(start_year, start_month)
+        log(f"📅 다운로드 기간: {start_year}-{start_month:02d} ~ {today.strftime('%Y-%m')} ({len(monthly_dates)}개월)")
+    else:
+        # 전체 기간
+        monthly_dates = generate_monthly_dates(2006, 1)
+        log(f"📅 다운로드 기간: 2006-01 ~ {today.strftime('%Y-%m')} ({len(monthly_dates)}개월)")
+    
+    # 테스트 모드
+    if args.test_mode:
+        monthly_dates = monthly_dates[-args.max_months:]
+        log(f"🧪 테스트 모드: 최근 {len(monthly_dates)}개월만")
+    
     log("")
     
     driver = build_driver()
@@ -1288,7 +1780,7 @@ def main():
         # 페이지 로드
         log("🌐 사이트 접속 중...")
         driver.get(MOLIT_URL)
-        time.sleep(5)  # 로딩 대기
+        time.sleep(5)  # 로딩 대기 증가
         try_accept_alert(driver, 2.0)
         
         # Google Translate 팝업 제거
@@ -1296,14 +1788,18 @@ def main():
         
         log(f"✅ 접속 완료: {driver.current_url}\n")
         
+        # 페이지 상태 확인
+        log(f"📄 페이지 제목: {driver.title}")
+        log("")
+        
         # 전체 통계
         total_success = 0
         total_fail = 0
         
-        # 7개 탭 처리
-        for prop_idx, property_type in enumerate(PROPERTY_TYPES, 1):
+        # 다운로드가 필요한 섹션만 처리
+        for prop_idx, property_type in enumerate(properties_to_download, 1):
             log("="*70)
-            log(f"📊 [{prop_idx}/{len(PROPERTY_TYPES)}] {property_type}")
+            log(f"📊 [{prop_idx}/{len(properties_to_download)}] {property_type}")
             log("="*70)
             
             # 탭 선택
@@ -1311,12 +1807,57 @@ def main():
                 log(f"⚠️  탭 선택 실패, 다음 종목으로...")
                 continue
             
-            # 최근 3개월 처리
+            # 진행 상황 확인
+            prop_key = sanitize_folder_name(property_type)
+            last_completed = progress.get(prop_key, {}).get("last_month", "")
+            
+            # 이 섹션에 대한 월별 날짜 범위 생성
+            if update_mode:
+                # 업데이트 모드: 최근 1년만 갱신 (last_completed와 무관하게)
+                today = date.today()
+                start_year = today.year - 1
+                start_month = today.month
+                section_monthly_dates = generate_monthly_dates(start_year, start_month)
+            else:
+                # 전체 다운로드 모드: 2006-01부터
+                if last_completed:
+                    # last_completed 다음 달부터 시작
+                    last_year = int(last_completed[:4])
+                    last_month = int(last_completed[4:6])
+                    if last_month == 12:
+                        start_year = last_year + 1
+                        start_month = 1
+                    else:
+                        start_year = last_year
+                        start_month = last_month + 1
+                else:
+                    # 파일이 없으면 섹션별 시작 년도/월부터
+                    section_start_year = SECTION_START_YEAR.get(property_type, 2006)
+                    section_start_month = SECTION_START_MONTH.get(property_type, 1)
+                    start_year = section_start_year
+                    start_month = section_start_month
+                section_monthly_dates = generate_monthly_dates(start_year, start_month)
+            
+            if last_completed:
+                log(f"📌 마지막 완료: {last_completed}")
+                log(f"🔄 이어서 진행합니다... ({start_year:04d}-{start_month:02d}부터)")
+            else:
+                log(f"🆕 처음 시작합니다 ({start_year:04d}-{start_month:02d}부터)")
+            
+            log(f"📅 다운로드 예정: {len(section_monthly_dates)}개월")
+            
+            # 각 월별로
             success_count = 0
             fail_count = 0
+            consecutive_fails = 0
+            skipped_count = 0
             
-            for month_idx, (year, month) in enumerate(recent_months, 1):
-                log(f"\n[{month_idx}/{len(recent_months)}]", end=" ")
+            for month_idx, (start_date, end_date) in enumerate(section_monthly_dates, 1):
+                year = start_date.year
+                month = start_date.month
+                month_key = f"{year:04d}{month:02d}"
+                
+                log(f"\n[{month_idx}/{len(section_monthly_dates)}]", end=" ")
                 
                 # 두 번째 다운로드부터는 페이지를 재로드하고 탭을 다시 선택 (안정성 향상)
                 if month_idx > 1:
@@ -1362,49 +1903,36 @@ def main():
                     if not tab_selected:
                         log(f"  ❌ 탭 재선택 실패, 다운로드 시도 계속...")
                 
-                # 날짜 범위 계산
-                start_date = date(year, month, 1)
-                if month == 12:
-                    end_date = date(year + 1, 1, 1) - timedelta(days=1)
-                else:
-                    end_date = date(year, month + 1, 1) - timedelta(days=1)
-                
                 # 다운로드 시도 (최대 3회 재시도)
-                downloaded_file = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3)
+                success = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3)
                 
-                if downloaded_file:
-                    # 파일 이동 및 전처리
-                    try:
-                        dest_path = move_and_rename_file(downloaded_file, property_type, year, month)
-                        
-                        # 다운로드 성공 후 temp 폴더 정리 (남은 임시 파일 제거)
-                        try:
-                            for temp_file in TEMP_DOWNLOAD_DIR.glob("*"):
-                                try:
-                                    if temp_file.is_file():
-                                        temp_file.unlink()
-                                except:
-                                    pass
-                        except:
-                            pass
-                        
-                        if dest_path or IS_CI:
-                            success_count += 1
-                            log(f"✅ 완료: {property_type} {year:04d}{month:02d}")
-                    except Exception as e:
-                        log(f"  ❌ 파일 이동/전처리 실패: {e}")
-                        fail_count += 1
+                if success:
+                    success_count += 1
+                    consecutive_fails = 0
+                    
+                    # 진행 상황 저장
+                    if prop_key not in progress:
+                        progress[prop_key] = {}
+                    progress[prop_key]["last_month"] = month_key
+                    progress[prop_key]["last_update"] = datetime.now().isoformat()
+                    save_progress(progress)
                 else:
                     fail_count += 1
-                    log(f"⚠️  다운로드 실패: {property_type} {year:04d}{month:02d}")
+                    consecutive_fails += 1
+                    log(f"⚠️  실패 카운트: {fail_count} (연속: {consecutive_fails})")
                 
                 # 다음 요청 전 대기 (서버 부하 방지 및 요청 간격 확보)
                 time.sleep(5)
             
             log(f"\n✅ {property_type} 완료")
-            log(f"   성공: {success_count}, 실패: {fail_count}")
+            log(f"   성공: {success_count}, 실패: {fail_count}, 스킵: {skipped_count}")
             total_success += success_count
             total_fail += fail_count
+            
+            # 테스트 모드: 첫 종목만
+            if args.test_mode:
+                log("\n🧪 테스트 모드 - 첫 종목만 완료")
+                break
             
             log("")
         
@@ -1419,10 +1947,12 @@ def main():
             log("⛔ 일일 다운로드 100건 제한 도달")
             log("="*70)
             log(f"📊 오늘 통계: 성공 {total_success}, 실패 {total_fail}")
+            log(f"💾 진행 상황 저장됨: {PROGRESS_FILE}")
             log("⏰ 내일 같은 명령어로 실행하면 이어서 진행됩니다.")
             log("="*70)
         elif isinstance(e, KeyboardInterrupt):
             log("\n⚠️  사용자 중단")
+            log(f"💾 진행 상황 저장됨: {PROGRESS_FILE}")
         else:
             log(f"\n❌ 오류 발생: {e}")
             import traceback
