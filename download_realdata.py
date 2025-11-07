@@ -1,3 +1,17 @@
+# --- runtime dep bootstrap: install pandas/numpy/openpyxl etc. if missing ---
+import sys, subprocess
+try:
+    import pandas  # noqa: F401
+    import numpy   # noqa: F401
+    import openpyxl  # noqa: F401
+except ModuleNotFoundError:
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install", "--upgrade",
+        "pandas", "numpy", "openpyxl",
+        "google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib",
+        "python-dateutil", "pytz", "tzdata", "et-xmlfile"
+    ])
+# ---------------------------------------------------------------------------
 # 공유드라이브 업로드 개선 — 전처리된 파일을 종목별 폴더에 덮어쓰기
 # - 각 종목(아파트, 단독다가구 등)은 동일 이름의 하위 폴더로 분류됨
 # - 전처리 후 파일은 해당 폴더에 동일 이름으로 덮어쓰기됨
