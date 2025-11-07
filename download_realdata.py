@@ -458,70 +458,38 @@ def _drop_no_col(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _split_sigungu(df: pd.DataFrame) -> pd.DataFrame:
+    """'시군구'는 삭제하지 않고 보존하면서 파생 컬럼(광역/구/법정동/리)을 추가."""
     if "시군구" not in df.columns:
         return df
     parts = df["시군구"].astype(str).str.split(expand=True, n=3)
-    for i, name in enumerate(["광역","구","법정동","리"]):
-        df[name] = parts[i] if parts.shape[1] > i else ""
-    return df.drop(columns=["시군구"])  # 원본 제거
-
-
-def _split_yymm(df: pd.DataFrame) -> pd.DataFrame:
-    if "계약년월" not in df.columns:
-        return df
-    s = df["계약년월"].astype(str).str.replace(r"\D", "", regex=True)
-    df["계약년"] = s.str.slice(0, 4)
-    df["계약월"] = s.str.slice(4, 6)
-    return df.drop(columns=["계약년월"])  # 원본 제거
-
-
-def _normalize_numbers(df: pd.DataFrame) -> pd.DataFrame:
-    for col in ["거래금액(만원)", "전용면적(㎡)", "면적(㎡)"]:
-        if col in df.columns:
-            df[col] = (
-                df[col].astype(str)
-                     .str.replace(r"[^0-9.\-]", "", regex=True)
-                     .replace({"": np.nan})
-            )
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
+    for i, name in enumerate(["광역", "구", "법정동", "리"]):
+        if name not in df.columns:  # 기존에 있으면 덮어쓰지 않음
+            df[name] = parts[i] if parts.shape[1] > i else ""
+    return df  # 원본 '시군구' 유지
 
 
 def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """요청하신 정확한 헤더 순서로 정렬하고, 나머지 컬럼은 뒤에 보존."""
+    target_order = [
+        "광역","구","법정동","리","계약년","계약월","계약일",
+        "시군구","번지","본번","부번","단지명","전용면적(㎡)",
+        "거래금액(만원)","동","층","매수자","매도자","건축년도",
+        "도로명","해제사유발생일","거래유형","중개사소재지","등기일자","주택유형"
+    ]
     cols = list(df.columns)
-    left = [c for c in ["광역","구","법정동","리"] if c in cols]
-    others = [c for c in cols if c not in left]
-
-    for it in ["계약년","계약월"]:
-        if it in others:
-            others.remove(it)
-    if "계약일" in others:
-        idx = others.index("계약일")
-        others[idx:idx] = [c for c in ["계약년","계약월"] if c in cols]
-    else:
-        others = [c for c in ["계약년","계약월"] if c in cols] + others
-
-    new_cols = left + others
-    return df.reindex(columns=[c for c in new_cols if c in cols])
-
-
-def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
-    return _reorder_columns(
-        _normalize_numbers(
-            _split_yymm(
-                _split_sigungu(
-                    _drop_no_col(df)
-                )
-            )
-        )
-    )
+    ordered = [c for c in target_order if c in cols]
+    others = [c for c in cols if c not in ordered]
+    return df.reindex(columns=ordered + others)
 
 
 def _assert_preprocessed(df: pd.DataFrame):
+    """금지/필수 컬럼 검증 규칙을 '시군구' 허용으로 변경."""
     cols = set(df.columns)
-    banned = [c for c in ["시군구","계약년월"] if c in cols]
+    # '계약년월'만 금지(시군구는 허용)
+    banned = [c for c in ["계약년월"] if c in cols]
     if banned:
         raise RuntimeError(f"전처리 실패: 금지 컬럼 잔존 {banned}")
+    # 핵심 파생 컬럼 존재 여부 확인
     for must in ["광역","구","법정동","계약년","계약월"]:
         if must not in cols:
             raise RuntimeError(f"전처리 실패: 필수 컬럼 누락 {must}")
