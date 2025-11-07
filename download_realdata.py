@@ -144,8 +144,14 @@ def build_driver():
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
         "safebrowsing.enabled": True,
+        "profile.default_content_setting_values.notifications": 2,  # 알림 차단
+        "profile.content_settings.exceptions.automatic_downloads.*.setting": 1,  # 자동 다운로드 허용 (알림 없이)
     }
     opts.add_experimental_option("prefs", prefs)
+    
+    # 자동 다운로드 알림 비활성화
+    opts.add_argument("--disable-notifications")
+    opts.add_argument("--disable-infobars")
     
     # CI 환경
     chromedriver_bin = os.getenv("CHROMEDRIVER_BIN")
