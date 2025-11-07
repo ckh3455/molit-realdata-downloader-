@@ -57,6 +57,16 @@ TAB_IDS = {
     "토지": "xlsTab7",
     "공장창고등": "xlsTab8",
 }
+# 실제 탭 라벨 텍스트(페이지에 표시되는 한글)
+TAB_TEXT = {
+    "아파트": "아파트",
+    "연립다세대": "연립/다세대",
+    "단독다가구": "단독/다가구",
+    "오피스텔": "오피스텔",
+    "상업업무용": "상업/업무용",
+    "토지": "토지",
+    "공장창고등": "공장/창고 등",
+}
 
 # 7개 탭 전체 순회 리스트
 PROPERTY_TYPES = [
@@ -125,19 +135,76 @@ def _try_alert(driver: webdriver.Chrome, wait=1.5):
             time.sleep(0.2)
     return False
 
-def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=12) -> bool:
+def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=12, tab_label: str | None = None) -> bool:
+    """탭 클릭 안정화: 컨테이너 대기 → ID 시도 → JS 시도 → 라벨 매칭 클릭"""
     try:
         WebDriverWait(driver, wait_sec).until(lambda d: d.execute_script("return document.readyState") == "complete")
-        el = WebDriverWait(driver, wait_sec).until(EC.element_to_be_clickable((By.ID, tab_id)))
+        # 탭 컨테이너가 올라올 때까지 먼저 대기
+        WebDriverWait(driver, wait_sec).until(EC.presence_of_element_located((By.CSS_SELECTOR, "ul.quarter-tab-cover")))
+    except Exception as e:
+        log(f"  - tab container wait failed: {e}")
+        return False
+
+    # 1) 표준 클릭(웹드라이버)
+    try:
+        el = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.ID, tab_id)))
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
         driver.execute_script("arguments[0].click();", el)
         time.sleep(0.3)
         active = driver.execute_script("var e=document.getElementById(arguments[0]);return e&&e.parentElement&&e.parentElement.className.includes('on');", tab_id)
-        if not active:
-            el.click(); time.sleep(0.2)
-        return True
-    except Exception as e:
-        log(f"  - tab click failed: {e}"); return False
+        if active:
+            return True
+    except Exception:
+        pass
+
+    # 2) JS 직접 클릭 (가시성 체크 포함)
+    try:
+        clicked = driver.execute_script(
+            """
+            var id = arguments[0];
+            var el = document.getElementById(id);
+            if (el && el.offsetParent !== null) {
+              el.scrollIntoView({block:'center'});
+              el.click();
+              return true;
+            }
+            return false;
+            """,
+            tab_id,
+        )
+        if clicked:
+            time.sleep(0.3)
+            active = driver.execute_script("var e=document.getElementById(arguments[0]);return e&&e.parentElement&&e.parentElement.classList.contains('on');", tab_id)
+            if active:
+                return True
+    except Exception:
+        pass
+
+    # 3) 라벨 매칭으로 클릭(텍스트 기준)
+    try:
+        lbl = tab_label or ""
+        if not lbl:
+            # id에 매핑되는 라벨 추정
+            for k,v in TAB_IDS.items():
+                if v == tab_id:
+                    lbl = TAB_TEXT.get(k, k)
+                    break
+        if lbl:
+            js = (
+                "var lbl = arguments[0];\n" 
+                "var as = document.querySelectorAll('ul.quarter-tab-cover a');\n"
+                "for (var i=0;i<as.length;i++){var t=as[i].textContent.trim(); if (t===lbl){as[i].scrollIntoView({block:'center'}); as[i].click(); return true;}}\n"
+                "return false;"
+            )
+            clicked = driver.execute_script(js, lbl)
+            if clicked:
+                time.sleep(0.3)
+                return True
+    except Exception:
+        pass
+
+    log("  - tab click failed: all strategies")
+    return False
 
 
 def _looks_like_date_input(el) -> bool:
@@ -387,7 +454,7 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
     for nav_try in range(1,4):
         driver.switch_to.default_content(); driver.get(URL); time.sleep(0.8)
         try:
-            click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"))
+            click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind))
             set_dates(driver, start, end)
             break
         except Exception as e:
@@ -405,7 +472,7 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
             time.sleep(1.0)
             if attempt%5==0:
                 driver.switch_to.default_content(); driver.get(URL); time.sleep(0.8)
-                click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1")); set_dates(driver, start, end)
+                click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind)); set_dates(driver, start, end)
             continue
         try:
             got=wait_download(TMP_DL, before, timeout=30)
@@ -415,7 +482,7 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
             log(f"  - warn: 다운로드 시작 감지 실패(시도 {attempt}/15)")
             if attempt%5==0:
                 driver.switch_to.default_content(); driver.get(URL); time.sleep(0.8)
-                click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1")); set_dates(driver, start, end)
+                click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind)); set_dates(driver, start, end)
             continue
 
     if not got_file:
