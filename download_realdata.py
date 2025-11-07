@@ -191,9 +191,12 @@ def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=12, tab_label: str
                     break
         if lbl:
             js = (
-                "var lbl = arguments[0];\n" 
-                "var as = document.querySelectorAll('ul.quarter-tab-cover a');\n"
-                "for (var i=0;i<as.length;i++){var t=as[i].textContent.trim(); if (t===lbl){as[i].scrollIntoView({block:'center'}); as[i].click(); return true;}}\n"
+                "var lbl = arguments[0];
+" 
+                "var as = document.querySelectorAll('ul.quarter-tab-cover a');
+"
+                "for (var i=0;i<as.length;i++){var t=as[i].textContent.trim(); if (t===lbl){as[i].scrollIntoView({block:'center'}); as[i].click(); return true;}}
+"
                 "return false;"
             )
             clicked = driver.execute_script(js, lbl)
@@ -499,6 +502,12 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
     # 전처리 → 저장 → 업로드
     df=_read_excel_first_table(got_file)
     df=preprocess_df(df)
+    # 헤더/크기 로그 출력 (전처리 후)
+    try:
+        log("  - 헤더(전처리 후): " + " | ".join([str(c) for c in df.columns.tolist()]))
+        log(f"  - 행/열 크기: {df.shape[0]} rows × {df.shape[1]} cols")
+    except Exception:
+        pass
     if PREPROCESS_STRICT:
         _assert_preprocessed(df)
         log("  - 전처리 검증 통과")
