@@ -1505,8 +1505,33 @@ def save_progress(progress: dict):
     with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
         json.dump(progress, f, indent=2, ensure_ascii=False)
 
-def is_already_downloaded(property_type: str, year: int, month: int) -> bool:
-    """이미 다운로드된 파일인지 확인"""
+def is_already_downloaded(property_type: str, year: int, month: int, update_mode: bool = False) -> bool:
+    """이미 다운로드된 파일인지 확인
+    
+    Args:
+        property_type: 부동산 종목
+        year: 연도
+        month: 월
+        update_mode: 업데이트 모드일 때는 최근 3개월은 항상 False 반환 (재다운로드)
+    """
+    # 업데이트 모드일 때는 최근 3개월 범위에 있으면 항상 재다운로드
+    if update_mode:
+        today = date.today()
+        months_to_subtract = 2  # 현재 월 포함하여 3개월
+        if today.month <= months_to_subtract:
+            update_start_year = today.year - 1
+            update_start_month = today.month + 12 - months_to_subtract
+        else:
+            update_start_year = today.year
+            update_start_month = today.month - months_to_subtract
+        
+        # 현재 파일이 최근 3개월 범위에 있는지 확인
+        file_date = date(year, month, 1)
+        update_start_date = date(update_start_year, update_start_month, 1)
+        if file_date >= update_start_date:
+            # 최근 3개월 범위에 있으면 항상 재다운로드
+            return False
+    
     folder_name = sanitize_folder_name(property_type)
     filename = f"{property_type} {year:04d}{month:02d}.xlsx"
     dest_path = DOWNLOAD_DIR / folder_name / filename
@@ -2005,6 +2030,12 @@ def main():
                     
                     if not tab_selected:
                         log(f"  ❌ 탭 재선택 실패, 다운로드 시도 계속...")
+                
+                # 파일 존재 확인 (업데이트 모드일 때는 최근 3개월은 스킵하지 않음)
+                if is_already_downloaded(property_type, year, month, update_mode=update_mode):
+                    log(f"  ⏭️  이미 존재함, 스킵")
+                    skipped_count += 1
+                    continue
                 
                 # 다운로드 시도 (최대 3회 재시도)
                 success = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3)
