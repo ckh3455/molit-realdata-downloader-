@@ -190,15 +190,19 @@ def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=12, tab_label: str
                     lbl = TAB_TEXT.get(k, k)
                     break
         if lbl:
-            js = (
-                "var lbl = arguments[0];
-" 
-                "var as = document.querySelectorAll('ul.quarter-tab-cover a');
-"
-                "for (var i=0;i<as.length;i++){var t=as[i].textContent.trim(); if (t===lbl){as[i].scrollIntoView({block:'center'}); as[i].click(); return true;}}
-"
-                "return false;"
-            )
+            js = """
+                var lbl = arguments[0];
+                var as = document.querySelectorAll('ul.quarter-tab-cover a');
+                for (var i = 0; i < as.length; i++) {
+                    var t = as[i].textContent.trim();
+                    if (t === lbl) {
+                        as[i].scrollIntoView({block: 'center'});
+                        as[i].click();
+                        return true;
+                    }
+                }
+                return false;
+            """
             clicked = driver.execute_script(js, lbl)
             if clicked:
                 time.sleep(0.3)
