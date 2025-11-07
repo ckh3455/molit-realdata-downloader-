@@ -8,38 +8,51 @@ on:
 jobs:
   download:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-    
-    - name: Install Chrome
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y google-chrome-stable
-    
-    - name: Download Real Estate Data
-      env:
-        CI: "1"
-        GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-      run: |
-        python download_realdata.py --update-mode
-      continue-on-error: true
-    
-    - name: Upload progress file
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: download-progress
-        path: download_progress.json
-        retention-days: 30
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Chrome은 공식 액션으로 설치하는 게 깔끔함
+      - name: Set up Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Download Real Estate Data (Drive upload mode)
+        env:
+          CI: "1"
+          # === 스크립트가 자동 인식하는 이름 ===
+          GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}   # 서비스계정(JSON 또는 base64)
+          GDRIVE_FOLDER_ID:        ${{ secrets.GDRIVE_FOLDER_ID }}          # 업로드 '폴더' ID
+          ARTIFACTS_ONLY: "0"                                              # Drive로만 업로드
+          # 필요 시 종목 지정(기본: 아파트). 예: "오피스텔", "토지" ...
+          # PROP_KIND: "아파트"
+        run: |
+          python download_realdata.py --update-mode
+
+      # ↓ 아티팩트는 "원할 때만" (ARTIFACTS_ONLY=1) 업로드하도록 조건부 처리
+      - name: Upload XLSX artifacts
+        if: env.ARTIFACTS_ONLY == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: molit-xlsx-${{ github.run_number }}
+          path: output/*.xlsx
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload progress file
+        if: env.ARTIFACTS_ONLY == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: download-progress
+          path: download_progress.json
+          if-no-files-found: ignore
+          retention-days: 30
