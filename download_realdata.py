@@ -1567,7 +1567,7 @@ def check_if_all_historical_complete(progress: dict) -> bool:
     
     return True
 
-def download_single_month_with_retry(driver, property_type: str, start_date: date, end_date: date, max_retries: int = 3) -> bool:
+def download_single_month_with_retry(driver, property_type: str, start_date: date, end_date: date, max_retries: int = 3, update_mode: bool = False) -> bool:
     """단일 월 다운로드 - 재시도 포함"""
     year = start_date.year
     month = start_date.month
@@ -1576,8 +1576,8 @@ def download_single_month_with_retry(driver, property_type: str, start_date: dat
     log(f"📅 {property_type} {year}년 {month}월")
     log(f"{'='*60}")
     
-    # 이미 다운로드됨?
-    if is_already_downloaded(property_type, year, month):
+    # 이미 다운로드됨? (업데이트 모드일 때는 최근 3개월은 스킵하지 않음)
+    if is_already_downloaded(property_type, year, month, update_mode=update_mode):
         log(f"  ⏭️  이미 존재함, 스킵")
         return True
     
@@ -2038,7 +2038,7 @@ def main():
                     continue
                 
                 # 다운로드 시도 (최대 3회 재시도)
-                success = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3)
+                success = download_single_month_with_retry(driver, property_type, start_date, end_date, max_retries=3, update_mode=update_mode)
                 
                 if success:
                     success_count += 1
