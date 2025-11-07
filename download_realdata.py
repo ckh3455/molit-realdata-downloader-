@@ -490,7 +490,13 @@ def save_excel(path: Path, df: pd.DataFrame):
             ws.column_dimensions[get_column_letter(idx)].width = width
 
 # ---------- Google(옵션) ----------
-DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "").strip()
+# 공유드라이브 폴더 ID: 기존 워크플로와 호환을 위해 여러 이름을 지원
+DRIVE_FOLDER_ID = (
+    os.getenv("DRIVE_FOLDER_ID")
+    or os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+    or os.getenv("TEAM_DRIVE_FOLDER_ID")
+    or ""
+).strip()
 DRIVE_RETENTION_DAYS = int(os.getenv("DRIVE_RETENTION_DAYS", "3") or "3")
 SHEET_ID = os.getenv("SHEET_ID", "").strip()
 
@@ -502,10 +508,74 @@ def load_sa_credentials(sa_path: Path):
             "https://www.googleapis.com/auth/drive",
             "https://www.googleapis.com/auth/spreadsheets"
         ]
-        data = json.loads(Path(sa_path).read_text(encoding="utf-8"))
-        creds = Credentials.from_service_account_info(data, scopes=scopes)
-        debug("  - SA loaded.")
-        return creds
+        # 0) SA_DISABLED=1 이면 강제 비활성화
+        if os.getenv("SA_DISABLED", "").strip() == "1":
+            debug("  ! SA disabled by env (SA_DISABLED=1)")
+            return None
+
+        # 1) 파일 경로 우선 (확장자 무관, JSON 텍스트면 OK)
+        if sa_path and sa_path.exists():
+            raw = Path(sa_path).read_text(encoding="utf-8").strip()
+            data = json.loads(raw)
+            creds = Credentials.from_service_account_info(data, scopes=scopes)
+            debug(f"  - SA loaded from file: {sa_path}")
+            return creds
+
+        # 2) SA_JSON_FILE 환경변수(리포 내 다른 경로 .json/.txt 지원)
+        sa_file_env = os.getenv("SA_JSON_FILE", "").strip()
+        if sa_file_env and Path(sa_file_env).exists():
+            raw = Path(sa_file_env).read_text(encoding="utf-8").strip()
+            data = json.loads(raw)
+            creds = Credentials.from_service_account_info(data, scopes=scopes)
+            debug(f"  - SA loaded from file(env): {sa_file_env}")
+            return creds
+
+        # 3) 환경변수 SA_JSON (json 문자열)
+        sa_json = os.getenv("SA_JSON", "").strip()
+        if sa_json:
+            data = json.loads(sa_json)
+            creds = Credentials.from_service_account_info(data, scopes=scopes)
+            debug("  - SA loaded from env: SA_JSON")
+            return creds
+
+        # 4) 환경변수 SA_JSON_BASE64 (base64 인코딩)
+        sa_b64 = os.getenv("SA_JSON_BASE64", "").strip()
+        if sa_b64:
+            import base64
+            decoded = base64.b64decode(sa_b64)
+            data = json.loads(decoded.decode("utf-8"))
+            creds = Credentials.from_service_account_info(data, scopes=scopes)
+            debug("  - SA loaded from env: SA_JSON_BASE64")
+            return creds
+
+        # 5) 환경변수 SA_ENV_VAR_NAME: 다른 시크릿 키 이름을 가리키는 포인터
+        ref_name = os.getenv("SA_ENV_VAR_NAME", "").strip()
+        if ref_name and os.getenv(ref_name, "").strip():
+            raw = os.getenv(ref_name).strip()
+            # 자동 판별: base64면 디코딩, 아니면 그대로 파싱
+            try:
+                import base64
+                decoded = base64.b64decode(raw)
+                try:
+                    raw2 = decoded.decode("utf-8")
+                    data = json.loads(raw2)
+                    creds = Credentials.from_service_account_info(data, scopes=scopes)
+                    debug(f"  - SA loaded from env pointer(base64): ${ref_name}")
+                    return creds
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            data = json.loads(raw)
+            creds = Credentials.from_service_account_info(data, scopes=scopes)
+            debug(f"  - SA loaded from env pointer(json): ${ref_name}")
+            return creds
+
+        debug("  ! service account not provided (no file/env).")
+        return None
+    except Exception as e:
+        debug(f"  ! service account load failed: {e}")
+        return None
     except Exception as e:
         debug(f"  ! service account load failed: {e}")
         return None
@@ -516,8 +586,14 @@ def drive_upload_and_cleanup(creds, file_path: Path):
     - 같은 이름이 있으면 첫 번째 파일에 update, 나머지는 삭제하여 중복 제거
     - supportsAllDrives/includeItemsFromAllDrives 활성화
     """
-    if ARTIFACTS_ONLY or not creds or not DRIVE_FOLDER_ID:
-        debug("  - skip Drive upload (Artifacts mode or missing creds/folder).")
+    if ARTIFACTS_ONLY:
+        debug("  - skip Drive upload [reason: ARTIFACTS_ONLY=1]")
+        return
+    if not creds:
+        debug("  - skip Drive upload [reason: creds=None]")
+        return
+    if not DRIVE_FOLDER_ID:
+        debug("  - skip Drive upload [reason: DRIVE_FOLDER_ID empty]")
         return
     try:
         from googleapiclient.discovery import build
