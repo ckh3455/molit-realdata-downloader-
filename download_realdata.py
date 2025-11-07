@@ -38,7 +38,10 @@ FOLDER_MAP = {
     '공장창고등': '공장창고등'
 }
 
-DRIVE_ROOT_ID = os.getenv('GDRIVE_FOLDER_ID', '').strip()
+# 환경 변수
+DRIVE_ROOT_ID = os.getenv('GDRIVE_FOLDER_ID', '').strip()  # 시작 기준 폴더 ID (예: 공유드라이브 루트 '부동산자료')
+GDRIVE_BASE_PATH = os.getenv('GDRIVE_BASE_PATH', '').strip()  # 예: "부동산 실거래자료" 또는 "부동산자료/부동산 실거래자료"
+
 
 def load_sa():
     raw = os.getenv('GCP_SERVICE_ACCOUNT_KEY', '').strip()
@@ -50,6 +53,8 @@ def load_sa():
         data = json.loads(base64.b64decode(raw).decode('utf-8'))
     return Credentials.from_service_account_info(data, scopes=['https://www.googleapis.com/auth/drive'])
 
+# (참고) 생성 함수 — 이번 버전에서는 폴더 미생성 정책이라 사용하지 않음(남겨둠)
+
 def ensure_subfolder(svc, parent_id: str, name: str):
     q = f"name='{name}' and '{parent_id}' in parents and trashed=false"
     resp = svc.files().list(q=q, spaces='drive', fields='files(id,name)', supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
@@ -60,9 +65,41 @@ def ensure_subfolder(svc, parent_id: str, name: str):
     f = svc.files().create(body=meta, fields='id', supportsAllDrives=True).execute()
     return f['id']
 
+# ─────────────────────────────────────────────────────────
+# 추가: 폴더 찾기 전용 (만들지 않음)
+# ─────────────────────────────────────────────────────────
+
+def find_child_folder_id(svc, parent_id: str, name: str):
+    """parent_id 아래에서 이름이 name인 폴더의 ID를 찾음. 없으면 None."""
+    q = (
+        f"name='{name}' and '{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    )
+    resp = (
+        svc.files()
+        .list(q=q, spaces='drive', fields='files(id,name)', supportsAllDrives=True, includeItemsFromAllDrives=True)
+        .execute()
+    )
+    files = resp.get('files', [])
+    return files[0]['id'] if files else None
+
+
+def resolve_path(svc, start_parent_id: str, path: str):
+    """'A/B/C' 경로를 순차적으로 '찾아 내려가며' 최종 폴더 ID를 반환. 중간에 없으면 None."""
+    current = start_parent_id
+    if not path:
+        return current
+    for seg in [p for p in path.split('/') if p.strip()]:
+        found = find_child_folder_id(svc, current, seg.strip())
+        if not found:
+            return None
+        current = found
+    return current
+
+
 def upload_processed(file_path: Path, prop_kind: str):
-    """전처리된 파일을 종목별 하위 폴더에 덮어쓰기 업로드.
-    파일이 없거나 루트 폴더 ID/SA가 없으면 스킵하고 로그만 남김.
+    """전처리된 파일을 기존 공유드라이브 경로로 덮어쓰기 업로드.
+    - 폴더는 새로 만들지 않음(경로 없으면 스킵하고 로그 남김).
+    경로 규칙: DRIVE_ROOT_ID / GDRIVE_BASE_PATH / <종목폴더>
     """
     if not file_path.exists():
         log(f"  - drive: skip (file not found): {file_path}")
@@ -77,8 +114,19 @@ def upload_processed(file_path: Path, prop_kind: str):
         return
 
     svc = build('drive', 'v3', credentials=creds, cache_discovery=False)
+
+    # ① 베이스 경로 찾아 들어가기 (예: '부동산 실거래자료')
+    base_parent_id = resolve_path(svc, DRIVE_ROOT_ID, GDRIVE_BASE_PATH)
+    if not base_parent_id:
+        log(f"  - drive: skip (base path not found): {GDRIVE_BASE_PATH}")
+        return
+
+    # ② 종목 폴더 찾기 (새로 만들지 않음)
     subfolder = FOLDER_MAP.get(prop_kind, prop_kind)
-    folder_id = ensure_subfolder(svc, DRIVE_ROOT_ID, subfolder)
+    folder_id = find_child_folder_id(svc, base_parent_id, subfolder)
+    if not folder_id:
+        log(f"  - drive: skip (category folder missing): {GDRIVE_BASE_PATH}/{subfolder}")
+        return
 
     name = file_path.name
     media = MediaFileUpload(
@@ -93,16 +141,17 @@ def upload_processed(file_path: Path, prop_kind: str):
     ).execute()
     files = resp.get('files', [])
 
-    log(f"  - drive target: {subfolder}/{name} (https://drive.google.com/drive/folders/{folder_id})")
+    full_path_for_log = "/".join([p for p in [GDRIVE_BASE_PATH, subfolder, name] if p])
+    log(f"  - drive target: {full_path_for_log} (https://drive.google.com/drive/folders/{folder_id})")
 
     if files:
         fid = files[0]['id']
         svc.files().update(fileId=fid, media_body=media, supportsAllDrives=True).execute()
-        log(f"  - drive: overwritten (update) → {subfolder}/{name}")
+        log(f"  - drive: overwritten (update) → {full_path_for_log}")
     else:
         meta = {'name': name, 'parents': [folder_id]}
         svc.files().create(body=meta, media_body=media, fields='id', supportsAllDrives=True).execute()
-        log(f"  - drive: uploaded (create) → {subfolder}/{name}")
+        log(f"  - drive: uploaded (create) → {full_path_for_log}")
 
 
 # ==================== 아래부터 다운로드/전처리/셀레니움 로직 ====================
@@ -133,11 +182,14 @@ TAB_IDS = {"아파트":"xlsTab1","연립다세대":"xlsTab2","단독다가구":"
 TAB_TEXT = {"아파트":"아파트","연립다세대":"연립/다세대","단독다가구":"단독/다가구","오피스텔":"오피스텔","상업업무용":"상업/업무용","토지":"토지","공장창고등":"공장/창고 등"}
 
 # ---------- 날짜 유틸 ----------
+
 def today_kst() -> date:
     return (datetime.utcnow() + timedelta(hours=9)).date()
 
+
 def month_first(d: date) -> date:
     return date(d.year, d.month, 1)
+
 
 def shift_months(d: date, k: int) -> date:
     y = d.year + (d.month - 1 + k) // 12
@@ -145,6 +197,7 @@ def shift_months(d: date, k: int) -> date:
     return date(y, m, 1)
 
 # ---------- 크롬 ----------
+
 def build_driver(download_dir: Path) -> webdriver.Chrome:
     opts = Options()
     opts.add_argument("--headless=new"); opts.add_argument("--no-sandbox"); opts.add_argument("--disable-dev-shm-usage")
@@ -167,6 +220,7 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
     return driver
 
 # ---------- 페이지 조작 ----------
+
 def _try_accept_alert(driver: webdriver.Chrome, wait=1.5) -> bool:
     t0 = time.time()
     while time.time() - t0 < wait:
@@ -175,6 +229,7 @@ def _try_accept_alert(driver: webdriver.Chrome, wait=1.5) -> bool:
         except Exception:
             time.sleep(0.15)
     return False
+
 
 def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=12, tab_label: Optional[str]=None) -> bool:
     try:
@@ -216,6 +271,7 @@ import re
 from typing import Tuple, Optional
 from selenium.webdriver.common.keys import Keys
 
+
 def _looks_like_date_input(el) -> bool:
     typ = (el.get_attribute("type") or "").lower()
     ph  = (el.get_attribute("placeholder") or "").lower()
@@ -231,6 +287,7 @@ def _looks_like_date_input(el) -> bool:
             any(k in txt for k in ["start","end","from","to","srchbgnde","srchendde"])
         )
     )
+
 
 def _find_inputs_current_context(driver) -> Optional[Tuple]:
     pairs = [
@@ -253,6 +310,7 @@ def _find_inputs_current_context(driver) -> Optional[Tuple]:
         return dates[0], dates[1]
     return None
 
+
 def find_date_inputs(driver) -> Tuple:
     driver.switch_to.default_content()
     _try_accept_alert(driver, 1.0)
@@ -274,6 +332,7 @@ def find_date_inputs(driver) -> Tuple:
     driver.switch_to.default_content()
     raise RuntimeError("날짜 입력 박스를 찾지 못했습니다.")
 
+
 def _type_and_verify(el, val: str) -> bool:
     try:
         el.click()
@@ -286,6 +345,7 @@ def _type_and_verify(el, val: str) -> bool:
         return (el.get_attribute("value") or "").strip() == val
     except Exception:
         return False
+
 
 def _ensure_value_with_js(driver, el, val: str) -> bool:
     try:
@@ -300,6 +360,7 @@ def _ensure_value_with_js(driver, el, val: str) -> bool:
         return (el.get_attribute("value") or "").strip() == val
     except Exception:
         return False
+
 
 def set_dates(driver, start: date, end: date):
     _try_accept_alert(driver, 1.0)
@@ -316,13 +377,14 @@ def set_dates(driver, start: date, end: date):
     assert (e_el.get_attribute("value") or "").strip() == e_val
 
 # ---------- 다운로드 클릭/대기 ----------
+
 def _click_by_locators(driver, label: str) -> bool:
     locators = [
         (By.XPATH, f"//button[normalize-space()='{label}']"),
         (By.XPATH, f"//a[normalize-space()='{label}']"),
         (By.XPATH, f"//input[@type='button' and @value='{label}']"),
         (By.XPATH, "//*[contains(@onclick,'excel') and (self::a or self::button or self::input)]"),
-        (By.XPATH, "//*[@id='excelDown' or @id='btnExcel' or contains(@id,'excel')]"),
+        (By.XPATH, "//*[@id='excelDown' or @id='btnExcel' or contains(@id,'excel')]")
     ]
     for by, q in locators:
         try:
@@ -336,6 +398,7 @@ def _click_by_locators(driver, label: str) -> bool:
         except Exception:
             continue
     return False
+
 
 def click_download(driver, kind="excel") -> bool:
     label = "EXCEL 다운" if kind == "excel" else "CSV 다운"
@@ -352,6 +415,7 @@ def click_download(driver, kind="excel") -> bool:
             continue
     return False
 
+
 def wait_download(dldir: Path, before: set, timeout: int) -> Path:
     endt = time.time() + timeout
     while time.time() < endt:
@@ -364,6 +428,7 @@ def wait_download(dldir: Path, before: set, timeout: int) -> Path:
 
 # ---------- 전처리 ----------
 from openpyxl.utils import get_column_letter
+
 
 def _read_excel_first_table(path: Path) -> pd.DataFrame:
     raw = pd.read_excel(path, engine="openpyxl", header=None, dtype=str).fillna("")
@@ -378,6 +443,7 @@ def _read_excel_first_table(path: Path) -> pd.DataFrame:
     df = df.loc[:, [c for c in df.columns if str(c).strip() != ""]]
     return df.reset_index(drop=True)
 
+
 def _drop_no_col(df: pd.DataFrame) -> pd.DataFrame:
     for c in list(df.columns):
         if str(c).strip().upper() == "NO":
@@ -385,6 +451,7 @@ def _drop_no_col(df: pd.DataFrame) -> pd.DataFrame:
             df = df.drop(columns=[c])
             break
     return df
+
 
 def _split_sigungu(df: pd.DataFrame) -> pd.DataFrame:
     if "시군구" not in df.columns:
@@ -394,6 +461,7 @@ def _split_sigungu(df: pd.DataFrame) -> pd.DataFrame:
         df[name] = parts[i] if parts.shape[1] > i else ""
     return df.drop(columns=["시군구"])  # 원본 제거
 
+
 def _split_yymm(df: pd.DataFrame) -> pd.DataFrame:
     if "계약년월" not in df.columns:
         return df
@@ -401,6 +469,7 @@ def _split_yymm(df: pd.DataFrame) -> pd.DataFrame:
     df["계약년"] = s.str.slice(0, 4)
     df["계약월"] = s.str.slice(4, 6)
     return df.drop(columns=["계약년월"])  # 원본 제거
+
 
 def _normalize_numbers(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["거래금액(만원)", "전용면적(㎡)", "면적(㎡)"]:
@@ -412,6 +481,7 @@ def _normalize_numbers(df: pd.DataFrame) -> pd.DataFrame:
             )
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
+
 
 def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
     cols = list(df.columns)
@@ -430,6 +500,7 @@ def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
     new_cols = left + others
     return df.reindex(columns=[c for c in new_cols if c in cols])
 
+
 def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
     return _reorder_columns(
         _normalize_numbers(
@@ -441,6 +512,7 @@ def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
         )
     )
 
+
 def _assert_preprocessed(df: pd.DataFrame):
     cols = set(df.columns)
     banned = [c for c in ["시군구","계약년월"] if c in cols]
@@ -449,6 +521,7 @@ def _assert_preprocessed(df: pd.DataFrame):
     for must in ["광역","구","법정동","계약년","계약월"]:
         if must not in cols:
             raise RuntimeError(f"전처리 실패: 필수 컬럼 누락 {must}")
+
 
 def save_excel(path: Path, df: pd.DataFrame):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -465,9 +538,11 @@ def save_excel(path: Path, df: pd.DataFrame):
             except Exception:
                 max_len = len(str(col))
             width = min(80, max(8, max_len + 2))
-            ws.column_dimensions[get_column_letter(idx)].width = width
+            from openpyxl.utils import get_column_letter as _gcl
+            ws.column_dimensions[_gcl(idx)].width = width
 
 # ---------- 파이프라인 ----------
+
 def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end: date, outname: str):
     # 진입/세팅(최대 3회 재시도)
     for nav_try in range(1, 4):
@@ -530,6 +605,7 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
     upload_processed(out, prop_kind)
 
 # ---------- 메인 ----------
+
 def main():
     t = today_kst()
     bases = [shift_months(month_first(t), -i) for i in range(2, -1, -1)]  # 최근 3개월(당월 포함)
