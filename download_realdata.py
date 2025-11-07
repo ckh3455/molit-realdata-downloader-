@@ -512,7 +512,10 @@ def load_sa_credentials(sa_path: Path):
 
 
 def drive_upload_and_cleanup(creds, file_path: Path):
-    """공유드라이브 업로드 지원 (supportsAllDrives / includeItemsFromAllDrives 사용)"""
+    """공유드라이브에 **동일 파일명 강제 덮어쓰기**
+    - 같은 이름이 있으면 첫 번째 파일에 update, 나머지는 삭제하여 중복 제거
+    - supportsAllDrives/includeItemsFromAllDrives 활성화
+    """
     if ARTIFACTS_ONLY or not creds or not DRIVE_FOLDER_ID:
         debug("  - skip Drive upload (Artifacts mode or missing creds/folder).")
         return
@@ -521,27 +524,77 @@ def drive_upload_and_cleanup(creds, file_path: Path):
         from googleapiclient.http import MediaFileUpload
         svc = build("drive", "v3", credentials=creds, cache_discovery=False)
 
-        media = MediaFileUpload(file_path.as_posix(), mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        meta = {"name": file_path.name, "parents": [DRIVE_FOLDER_ID]}
-        svc.files().create(body=meta, media_body=media, fields="id,name", supportsAllDrives=True).execute()
-        debug(f"  - uploaded to Drive: {file_path.name}")
+        name = file_path.name
+        media = MediaFileUpload(
+            file_path.as_posix(),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            resumable=False,
+        )
 
+        # 같은 이름의 파일 탐색 (해당 폴더 내부)
+        q = (
+            f"name='{name}' and '{DRIVE_FOLDER_ID}' in parents and trashed=false"
+        )
+        resp = svc.files().list(
+            q=q,
+            spaces="drive",
+            fields="files(id,name)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+        ).execute()
+        files = resp.get("files", [])
+
+        if files:
+            # 첫 번째 파일로 덮어쓰기
+            file_id = files[0]["id"]
+            svc.files().update(
+                fileId=file_id,
+                media_body=media,
+                supportsAllDrives=True,
+            ).execute()
+            debug(f"  - drive: overwritten (update) → {name}")
+
+            # 중복 파일이 더 있으면 정리
+            for dup in files[1:]:
+                try:
+                    svc.files().delete(fileId=dup["id"]).execute()
+                    debug(f"  - drive: removed duplicate → {dup['name']}")
+                except Exception:
+                    pass
+        else:
+            # 없으면 새로 생성
+            meta = {"name": name, "parents": [DRIVE_FOLDER_ID]}
+            svc.files().create(
+                body=meta,
+                media_body=media,
+                fields="id,name",
+                supportsAllDrives=True,
+            ).execute()
+            debug(f"  - drive: uploaded (create) → {name}")
+
+        # (선택) 보존기간 지난 파일 정리: 동일 폴더 내 전체 검사
         if DRIVE_RETENTION_DAYS > 0:
             from dateutil import parser as dtp
             cutoff = time.time() - DRIVE_RETENTION_DAYS * 86400
-            q = f"'{DRIVE_FOLDER_ID}' in parents and trashed=false"
-            items = svc.files().list(q=q, fields="files(id,name,createdTime)", includeItemsFromAllDrives=True, supportsAllDrives=True).execute().get("files", [])
+            q_all = f"'{DRIVE_FOLDER_ID}' in parents and trashed=false"
+            items = svc.files().list(
+                q=q_all,
+                fields="files(id,name,createdTime)",
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+            ).execute().get("files", [])
             for it in items:
                 try:
-                    ts = dtp.parse(it.get("createdTime","")).timestamp()
+                    ts = dtp.parse(it.get("createdTime", "")).timestamp()
                 except Exception:
                     continue
-                if ts < cutoff:
+                if ts < cutoff and it.get("name") != name:
                     try:
                         svc.files().delete(fileId=it["id"]).execute()
-                        debug(f"  - old removed: {it['name']}")
+                        debug(f"  - drive: retention removed → {it['name']}")
                     except Exception:
                         pass
+
     except Exception as e:
         debug(f"  ! drive error: {e}")
 
@@ -634,7 +687,7 @@ def fetch_and_process(driver: webdriver.Chrome,
     save_excel(out, df)
     debug(f"완료: {out}")
 
-    creds = None  # 아티팩트 모드
+    # 아티팩트 모드가 아니면 실제 자격증명으로 업로드
     drive_upload_and_cleanup(creds, out)
 
 # ---------- 메인 ----------
@@ -642,7 +695,8 @@ def fetch_and_process(driver: webdriver.Chrome,
 def main():
     # 서비스 계정은 있어도 되고 없어도 됨(Artifacts 모드 기준)
     sa_path = Path(os.getenv("SA_PATH", "sa.json"))
-    creds = load_sa_credentials(sa_path) if sa_path.exists() else None
+    # 파일이 없더라도 load_sa_credentials가 환경변수(SA_JSON / SA_JSON_BASE64)를 확인하도록 항상 호출
+    creds = load_sa_credentials(sa_path)
 
     driver = build_driver(TMP_DL)
     try:
