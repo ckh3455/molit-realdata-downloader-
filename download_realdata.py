@@ -236,6 +236,8 @@ def wait_download(dldir: Path, before: set, timeout: int=30) -> Path:
 
 # ---------- 전처리 ----------
 
+PREPROCESS_STRICT = os.getenv("PREPROCESS_STRICT", "1") == "1"
+
 def _read_excel_first_table(path: Path) -> pd.DataFrame:
     df = pd.read_excel(path, engine="openpyxl", dtype=str).fillna("")
     hdr=None
@@ -290,6 +292,26 @@ def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
     return _reorder_columns(_normalize_numbers(_split_yymm(_split_sigungu(_drop_no_col(df)))))
+
+
+def _assert_preprocessed(df: pd.DataFrame):
+    """전처리 검증: 원본 컬럼이 남지 않았는지, 새 컬럼이 생겼는지 확인"""
+    must_not = {"시군구", "계약년월", "NO"}
+    must_have_any_left = {"광역", "시"}  # 둘 중 하나는 있어야 함(전국/서울 구분 고려)
+    must_have = {"구", "법정동"}
+    # 1) 금지 컬럼이 남아있으면 실패
+    still = must_not.intersection(set(df.columns))
+    if still:
+        raise RuntimeError(f"전처리 실패: 잔존 금지 컬럼 {sorted(still)}")
+    # 2) 지역 컬럼 최소 요건
+    if not (must_have_any_left.intersection(set(df.columns))):
+        raise RuntimeError("전처리 실패: '광역' 또는 '시' 컬럼이 필요")
+    lack = must_have.difference(set(df.columns))
+    if lack:
+        raise RuntimeError(f"전처리 실패: 필수 컬럼 누락 {sorted(lack)}")
+    # 3) 계약년/계약월 규칙
+    if ("계약년" in df.columns) ^ ("계약월" in df.columns):
+        raise RuntimeError("전처리 실패: '계약년'과 '계약월'은 함께 존재해야 함")
 
 # ---------- Drive 업로드(덮어쓰기) ----------
 
@@ -349,12 +371,12 @@ def drive_upload_and_cleanup(creds, file_path: Path):
 
 # ---------- 다운로드 + 전처리 파이프라인 ----------
 
-def fetch_and_process(driver: webdriver.Chrome, start: date, end: date, outname: str, creds) -> None:
+def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end: date, outname: str, creds) -> None:
     # 네비게이션 + 탭 1회 선택 + 날짜 입력 (최대 3회 재시도)
     for nav_try in range(1,4):
         driver.switch_to.default_content(); driver.get(URL); time.sleep(0.8)
         try:
-            click_tab(driver, TAB_IDS.get(PROP_KIND, "xlsTab1"))
+            click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"))
             set_dates(driver, start, end)
             break
         except Exception as e:
@@ -367,12 +389,12 @@ def fetch_and_process(driver: webdriver.Chrome, start: date, end: date, outname:
     for attempt in range(1,16):
         before=set(p for p in TMP_DL.glob('*') if p.is_file())
         ok=click_download(driver)
-        log(f"  - click_download(excel) / attempt {attempt}: {ok}")
+        log(f"  - [{prop_kind}] click_download(excel) / attempt {attempt}: {ok}")
         if not ok:
             time.sleep(1.0)
             if attempt%5==0:
                 driver.switch_to.default_content(); driver.get(URL); time.sleep(0.8)
-                click_tab(driver, TAB_IDS.get(PROP_KIND, "xlsTab1")); set_dates(driver, start, end)
+                click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1")); set_dates(driver, start, end)
             continue
         try:
             got=wait_download(TMP_DL, before, timeout=30)
@@ -382,7 +404,7 @@ def fetch_and_process(driver: webdriver.Chrome, start: date, end: date, outname:
             log(f"  - warn: 다운로드 시작 감지 실패(시도 {attempt}/15)")
             if attempt%5==0:
                 driver.switch_to.default_content(); driver.get(URL); time.sleep(0.8)
-                click_tab(driver, TAB_IDS.get(PROP_KIND, "xlsTab1")); set_dates(driver, start, end)
+                click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1")); set_dates(driver, start, end)
             continue
 
     if not got_file:
@@ -399,9 +421,13 @@ def fetch_and_process(driver: webdriver.Chrome, start: date, end: date, outname:
     # 전처리 → 저장 → 업로드
     df=_read_excel_first_table(got_file)
     df=preprocess_df(df)
+    if PREPROCESS_STRICT:
+        _assert_preprocessed(df)
+        log("  - 전처리 검증 통과")
     out=OUT/outname
-    with pd.ExcelWriter(out, engine="openpyxl") as w: df.to_excel(w, index=False, sheet_name="data")
-    log(f"완료: {out}")
+    with pd.ExcelWriter(out, engine="openpyxl") as w:
+        df.to_excel(w, index=False, sheet_name="data" )
+    log(f"완료: [{prop_kind}] {out}")
     drive_upload_and_cleanup(creds, out)
 
 # ---------- 메인 ----------
@@ -417,12 +443,13 @@ def main():
 
     driver=build_driver(TMP_DL)
     try:
-        for base in bases:
-            start=base
-            end = t if (base.year,base.month)==(t.year,t.month) else (shift_months(base,1)-timedelta(days=1))
-            name=f"{PROP_KIND} {base:%Y%m}.xlsx"
-            log(f"[전국/{PROP_KIND}] {start} ~ {end} → {name}")
-            fetch_and_process(driver, start, end, name, creds)
+        for prop_kind in PROPERTY_TYPES:
+            for base in bases:
+                start=base
+                end = t if (base.year,base.month)==(t.year,t.month) else (shift_months(base,1)-timedelta(days=1))
+                name=f"{prop_kind} {base:%Y%m}.xlsx"
+                log(f"[전국/{prop_kind}] {start} ~ {end} → {name}")
+                fetch_and_process(driver, prop_kind, start, end, name, creds)
     finally:
         try: driver.quit()
         except Exception: pass
