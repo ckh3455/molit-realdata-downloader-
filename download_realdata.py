@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+# 국토부 실거래 다운로더 — xlsx+csv 동시 업로드 & 페이지 타임아웃/로그 패치 버전
+
 # --- runtime dep bootstrap: install pandas/numpy/openpyxl etc. if missing ---
 import sys, subprocess
 try:
@@ -11,11 +14,6 @@ except ModuleNotFoundError:
         "google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib",
         "python-dateutil", "pytz", "tzdata", "et-xmlfile"
     ])
-# ---------------------------------------------------------------------------
-# 공유드라이브 업로드 개선 — 전처리된 파일을 종목별 폴더에 덮어쓰기
-# - 각 종목(아파트, 단독다가구 등)은 동일 이름의 하위 폴더로 분류됨
-# - 전처리 후 파일은 해당 폴더에 동일 이름으로 덮어쓰기됨
-# - ★ 변경: 같은 이름의 CSV도 생성하여 동일 폴더에 덮어쓰기
 
 from pathlib import Path
 import pandas as pd
@@ -90,17 +88,17 @@ def detect_base_parent_id(svc):
     guess = find_child_folder_id(svc, DRIVE_ROOT_ID, "부동산 실거래자료")
     return guess or DRIVE_ROOT_ID
 
-# ★ 변경: 확장자에 따른 MIME 타입 자동 판정
+# ===== 업로드 유틸 =====
+
 def _guess_mimetype(file_path: Path) -> str:
     ext = file_path.suffix.lower()
     if ext == ".xlsx":
         return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     if ext == ".csv":
         return "text/csv"
-    # fallback
     return "application/octet-stream"
 
-# ★ 변경: 공통 업로드 유틸 (xlsx/csv 모두 지원)
+
 def upload_processed(file_path: Path, prop_kind: str):
     """전처리된 파일(xlsx 또는 csv)을 기존 공유드라이브 경로로 덮어쓰기 업로드.
     - 폴더는 새로 만들지 않음(경로 없으면 스킵하고 로그 남김).
@@ -134,10 +132,10 @@ def upload_processed(file_path: Path, prop_kind: str):
         return
 
     name = file_path.name
-    mimetype = _guess_mimetype(file_path)  # ★ 변경
+    mimetype = _guess_mimetype(file_path)
     media = MediaFileUpload(file_path.as_posix(), mimetype=mimetype)
 
-    # 현재 베이스 경로/루트의 '이름'을 로깅에 포함 (가독성 향상)
+    # 풀 경로 형태 로그
     try:
         root_meta = svc.files().get(fileId=DRIVE_ROOT_ID, fields='id,name').execute()
         base_meta = svc.files().get(fileId=base_parent_id, fields='id,name,parents').execute()
@@ -154,7 +152,6 @@ def upload_processed(file_path: Path, prop_kind: str):
     ).execute()
     files = resp.get('files', [])
 
-    # 풀 경로 형태 로그: [루트]/[베이스]/[종목]/파일명
     path_parts = [p for p in [root_name, base_name, subfolder, name] if p]
     full_path_for_log = "/".join(path_parts) if path_parts else f"{subfolder}/{name}"
     log(f"  - drive target: {full_path_for_log} (https://drive.google.com/drive/folders/{folder_id})")
@@ -168,7 +165,7 @@ def upload_processed(file_path: Path, prop_kind: str):
         svc.files().create(body=meta, media_body=media, fields='id', supportsAllDrives=True).execute()
         log(f"  - drive: uploaded (create) -> {full_path_for_log}")
 
-# ==================== 아래부터 다운로드/전처리/셀레니움 로직 ====================
+# ==================== 다운로드/전처리/셀레니움 ====================
 import re, time
 from datetime import date, timedelta, datetime
 from typing import Optional, Tuple
@@ -181,6 +178,7 @@ from selenium.webdriver.common.alert import Alert
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 
 URL = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
 OUT_DIR = Path(os.getenv("OUT_DIR", "output")).resolve(); OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -214,19 +212,41 @@ def shift_months(d: date, k: int) -> date:
 
 def build_driver(download_dir: Path) -> webdriver.Chrome:
     opts = Options()
-    opts.add_argument("--headless=new"); opts.add_argument("--no-sandbox"); opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu"); opts.add_argument("--disable-notifications"); opts.add_argument("--window-size=1400,900")
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--disable-notifications")
+    opts.add_argument("--window-size=1400,900")
     opts.add_argument("--lang=ko-KR")
-    prefs = {"download.default_directory": str(download_dir), "download.prompt_for_download": False, "download.directory_upgrade": True, "safebrowsing.enabled": True}
+    # 자동화 탐지 완화 & 빠른 로드 전략
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.page_load_strategy = "eager"
+
+    prefs = {
+        "download.default_directory": str(download_dir),
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True
+    }
     opts.add_experimental_option("prefs", prefs)
-    if os.getenv("CHROME_BIN"): opts.binary_location = os.getenv("CHROME_BIN")
+
+    if os.getenv("CHROME_BIN"):
+        opts.binary_location = os.getenv("CHROME_BIN")
+
     chromedriver_bin = os.getenv("CHROMEDRIVER_BIN")
     if chromedriver_bin and Path(chromedriver_bin).exists():
         service = Service(chromedriver_bin)
     else:
         from webdriver_manager.chrome import ChromeDriverManager
         service = Service(ChromeDriverManager().install())
+
     driver = webdriver.Chrome(service=service, options=opts)
+
+    # 페이지 하드 타임아웃
+    page_timeout = int(os.getenv("PAGELOAD_TIMEOUT", "20"))
+    driver.set_page_load_timeout(page_timeout)
+
     try:
         driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior":"allow","downloadPath": str(download_dir),"eventsEnabled": True})
     except Exception:
@@ -466,16 +486,16 @@ def _drop_no_col(df: pd.DataFrame) -> pd.DataFrame:
             break
     return df
 
-# === 변경 1: '시군구' 보존 + 파생 컬럼 추가 ===
+# '시군구' 보존 + 파생 컬럼 추가
+
 def _split_sigungu(df: pd.DataFrame) -> pd.DataFrame:
-    """'시군구'는 삭제하지 않고 보존하면서 파생 컬럼(광역/구/법정동/리)을 추가."""
     if "시군구" not in df.columns:
         return df
     parts = df["시군구"].astype(str).str.split(expand=True, n=3)
     for i, name in enumerate(["광역", "구", "법정동", "리"]):
-        if name not in df.columns:  # 기존에 있으면 덮어쓰지 않음
+        if name not in df.columns:
             df[name] = parts[i] if parts.shape[1] > i else ""
-    return df  # 원본 '시군구' 유지
+    return df
 
 
 def _split_yymm(df: pd.DataFrame) -> pd.DataFrame:
@@ -498,9 +518,8 @@ def _normalize_numbers(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
-# === 변경 2: 헤더 지정 순서로 정렬 ===
+
 def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """요청하신 정확한 헤더 순서로 정렬하고, 나머지 컬럼은 뒤에 보존."""
     target_order = [
         "광역","구","법정동","리","계약년","계약월","계약일",
         "시군구","번지","본번","부번","단지명","전용면적(㎡)",
@@ -513,7 +532,6 @@ def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.reindex(columns=ordered + others)
 
 
-# === 변경 3: 검증 규칙 — '시군구' 허용, '계약년월'만 금지 ===
 def _assert_preprocessed(df: pd.DataFrame):
     cols = set(df.columns)
     banned = [c for c in ["계약년월"] if c in cols]
@@ -524,16 +542,7 @@ def _assert_preprocessed(df: pd.DataFrame):
             raise RuntimeError(f"전처리 실패: 필수 컬럼 누락 {must}")
 
 
-# === 파이프라인(유지) ===
 def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    전처리 파이프라인:
-      1) NO 컬럼 제거
-      2) 시군구 분해(보존) -> 광역/구/법정동/리 추가
-      3) 계약년월 -> 계약년/계약월 분리
-      4) 숫자형 정규화
-      5) 최종 컬럼 순서 정렬(요청 순서)
-    """
     return _reorder_columns(
         _normalize_numbers(
             _split_yymm(
@@ -543,6 +552,7 @@ def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
             )
         )
     )
+
 
 def save_excel(path: Path, df: pd.DataFrame):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -562,7 +572,7 @@ def save_excel(path: Path, df: pd.DataFrame):
             from openpyxl.utils import get_column_letter
             ws.column_dimensions[get_column_letter(idx)].width = width
 
-# ★ 추가: CSV 저장 (엑셀 호환을 위해 utf-8-sig 사용)
+
 def save_csv(path: Path, df: pd.DataFrame):
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False, encoding="utf-8-sig")
@@ -573,14 +583,28 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
     # 진입/세팅(최대 3회 재시도)
     for nav_try in range(1, 4):
         driver.switch_to.default_content()
-        driver.get(URL)
+        log(f"  - nav{nav_try}: opening page {URL}")
+        try:
+            driver.get(URL)
+        except TimeoutException:
+            log(f"  - nav{nav_try}: driver.get timeout -> window.stop() 시도")
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+
         time.sleep(0.6)
+        log(f"  - nav{nav_try}: clicking tab {prop_kind}")
         if not click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind)):
+            log(f"  - nav{nav_try}: tab click failed, retrying...")
             if nav_try == 3:
                 raise RuntimeError("탭 진입 실패")
             continue
+
+        log(f"  - nav{nav_try}: setting dates {start} ~ {end}")
         try:
             set_dates(driver, start, end)
+            log(f"  - nav{nav_try}: dates set OK")
             break
         except Exception as e:
             log(f"  - warn: navigate/tab/set_dates retry ({nav_try}/3): {e}")
@@ -597,7 +621,15 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
             time.sleep(CLICK_RETRY_WAIT)
             if attempt % 5 == 0:
                 driver.switch_to.default_content()
-                driver.get(URL)
+                log("  - refresh page for retry")
+                try:
+                    driver.get(URL)
+                except TimeoutException:
+                    log("  - refresh timeout; window.stop()")
+                    try:
+                        driver.execute_script("window.stop();")
+                    except Exception:
+                        pass
                 time.sleep(0.6)
                 click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind))
                 set_dates(driver, start, end)
@@ -609,7 +641,15 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
             log(f"  - warn: 다운로드 시작 감지 실패(시도 {attempt}/{CLICK_RETRY_MAX})")
             if attempt % 5 == 0:
                 driver.switch_to.default_content()
-                driver.get(URL)
+                log("  - refresh page for retry")
+                try:
+                    driver.get(URL)
+                except TimeoutException:
+                    log("  - refresh timeout; window.stop()")
+                    try:
+                        driver.execute_script("window.stop();")
+                    except Exception:
+                        pass
                 time.sleep(0.6)
                 click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind))
                 set_dates(driver, start, end)
@@ -626,9 +666,8 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
     log(f"  - 행/열 크기: {df.shape[0]} rows × {df.shape[1]} cols")
     _assert_preprocessed(df)
 
-    # ★ 변경: 동일 이름의 xlsx와 csv 동시 생성
+    # 동일 이름의 xlsx와 csv 동시 생성
     out_xlsx = OUT_DIR / outname
-    # outname이 .xlsx라는 가정 하에 .csv로 치환
     out_csv  = OUT_DIR / (outname[:-5] + ".csv" if outname.lower().endswith(".xlsx") else (outname + ".csv"))
 
     save_excel(out_xlsx, df)
@@ -637,7 +676,7 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
     log(f"완료: [{prop_kind}] {out_xlsx}")
     log(f"완료: [{prop_kind}] {out_csv}")
 
-    # ★ 변경: 각각 덮어쓰기 업로드
+    # 각각 덮어쓰기 업로드
     upload_processed(out_xlsx, prop_kind)
     upload_processed(out_csv,  prop_kind)
 
