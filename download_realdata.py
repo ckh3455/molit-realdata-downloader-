@@ -188,6 +188,8 @@ IS_CI = os.getenv("CI", "") == "1"
 DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "30"))
 CLICK_RETRY_MAX  = int(os.getenv("CLICK_RETRY_MAX", "15"))
 CLICK_RETRY_WAIT = float(os.getenv("CLICK_RETRY_WAIT", "1"))
+# ↑ 다운로드 클릭 재시도 대기
+NAV_RETRY_MAX   = int(os.getenv("NAV_RETRY_MAX", "6"))  # ★ 추가: 탭 네비게이션 재시도 횟수(기본 6회)
 
 PROPERTY_TYPES = ["아파트","연립다세대","단독다가구","오피스텔","상업업무용","토지","공장창고등"]
 TAB_IDS = {"아파트":"xlsTab1","연립다세대":"xlsTab2","단독다가구":"xlsTab3","오피스텔":"xlsTab4","상업업무용":"xlsTab6","토지":"xlsTab7","공장창고등":"xlsTab8"}
@@ -581,7 +583,7 @@ def save_csv(path: Path, df: pd.DataFrame):
 
 def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end: date, outname: str):
     # 진입/세팅(최대 3회 재시도)
-    for nav_try in range(1, 4):
+    for nav_try in range(1, NAV_RETRY_MAX + 1):
         driver.switch_to.default_content()
         log(f"  - nav{nav_try}: opening page {URL}")
         try:
@@ -597,7 +599,7 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
         log(f"  - nav{nav_try}: clicking tab {prop_kind}")
         if not click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind)):
             log(f"  - nav{nav_try}: tab click failed, retrying...")
-            if nav_try == 3:
+            if nav_try == NAV_RETRY_MAX:
                 raise RuntimeError("탭 진입 실패")
             continue
 
@@ -607,8 +609,8 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
             log(f"  - nav{nav_try}: dates set OK")
             break
         except Exception as e:
-            log(f"  - warn: navigate/tab/set_dates retry ({nav_try}/3): {e}")
-            if nav_try == 3:
+            log(f"  - warn: navigate/tab/set_dates retry ({nav_try}/{NAV_RETRY_MAX}): {e}")
+            if nav_try == NAV_RETRY_MAX:
                 raise
             time.sleep(0.6)
 
