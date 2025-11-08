@@ -15,6 +15,7 @@ except ModuleNotFoundError:
 # 공유드라이브 업로드 개선 — 전처리된 파일을 종목별 폴더에 덮어쓰기
 # - 각 종목(아파트, 단독다가구 등)은 동일 이름의 하위 폴더로 분류됨
 # - 전처리 후 파일은 해당 폴더에 동일 이름으로 덮어쓰기됨
+# - ★ 변경: 같은 이름의 CSV도 생성하여 동일 폴더에 덮어쓰기
 
 from pathlib import Path
 import pandas as pd
@@ -89,9 +90,19 @@ def detect_base_parent_id(svc):
     guess = find_child_folder_id(svc, DRIVE_ROOT_ID, "부동산 실거래자료")
     return guess or DRIVE_ROOT_ID
 
+# ★ 변경: 확장자에 따른 MIME 타입 자동 판정
+def _guess_mimetype(file_path: Path) -> str:
+    ext = file_path.suffix.lower()
+    if ext == ".xlsx":
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if ext == ".csv":
+        return "text/csv"
+    # fallback
+    return "application/octet-stream"
 
+# ★ 변경: 공통 업로드 유틸 (xlsx/csv 모두 지원)
 def upload_processed(file_path: Path, prop_kind: str):
-    """전처리된 파일을 기존 공유드라이브 경로로 덮어쓰기 업로드.
+    """전처리된 파일(xlsx 또는 csv)을 기존 공유드라이브 경로로 덮어쓰기 업로드.
     - 폴더는 새로 만들지 않음(경로 없으면 스킵하고 로그 남김).
     경로 규칙: DRIVE_ROOT_ID /(GDRIVE_BASE_PATH 또는 자동탐지)/ <종목폴더>
     """
@@ -123,10 +134,8 @@ def upload_processed(file_path: Path, prop_kind: str):
         return
 
     name = file_path.name
-    media = MediaFileUpload(
-        file_path.as_posix(),
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    )
+    mimetype = _guess_mimetype(file_path)  # ★ 변경
+    media = MediaFileUpload(file_path.as_posix(), mimetype=mimetype)
 
     # 현재 베이스 경로/루트의 '이름'을 로깅에 포함 (가독성 향상)
     try:
@@ -535,7 +544,6 @@ def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
         )
     )
 
-
 def save_excel(path: Path, df: pd.DataFrame):
     path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
@@ -551,7 +559,13 @@ def save_excel(path: Path, df: pd.DataFrame):
             except Exception:
                 max_len = len(str(col))
             width = min(80, max(8, max_len + 2))
+            from openpyxl.utils import get_column_letter
             ws.column_dimensions[get_column_letter(idx)].width = width
+
+# ★ 추가: CSV 저장 (엑셀 호환을 위해 utf-8-sig 사용)
+def save_csv(path: Path, df: pd.DataFrame):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False, encoding="utf-8-sig")
 
 # ---------- 파이프라인 ----------
 
@@ -611,10 +625,21 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
     log("  - 헤더(전처리 후): " + " | ".join([str(c) for c in df.columns.tolist()]))
     log(f"  - 행/열 크기: {df.shape[0]} rows × {df.shape[1]} cols")
     _assert_preprocessed(df)
-    out = OUT_DIR / outname
-    save_excel(out, df)
-    log(f"완료: [{prop_kind}] {out}")
-    upload_processed(out, prop_kind)
+
+    # ★ 변경: 동일 이름의 xlsx와 csv 동시 생성
+    out_xlsx = OUT_DIR / outname
+    # outname이 .xlsx라는 가정 하에 .csv로 치환
+    out_csv  = OUT_DIR / (outname[:-5] + ".csv" if outname.lower().endswith(".xlsx") else (outname + ".csv"))
+
+    save_excel(out_xlsx, df)
+    save_csv(out_csv, df)
+
+    log(f"완료: [{prop_kind}] {out_xlsx}")
+    log(f"완료: [{prop_kind}] {out_csv}")
+
+    # ★ 변경: 각각 덮어쓰기 업로드
+    upload_processed(out_xlsx, prop_kind)
+    upload_processed(out_csv,  prop_kind)
 
 # ---------- 메인 ----------
 
