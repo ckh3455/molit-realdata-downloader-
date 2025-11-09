@@ -686,7 +686,7 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
 
 def main():
     t = today_kst()
-    bases = [shift_months(month_first(t), -i) for i in range(2, -1, -1)]  # 최근 3개월(당월 포함)
+    bases = [shift_months(month_first(t), -i) for i in range(4, -1, -1)]  # 최근 3개월(당월 포함)
     driver = build_driver(TMP_DIR)
     try:
         for prop_kind in PROPERTY_TYPES:
