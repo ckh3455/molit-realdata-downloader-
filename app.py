@@ -1,603 +1,731 @@
-import json
-import re
+# -*- coding: utf-8 -*-
+# 국토부 실거래 다운로더 — xlsx+csv 동시 업로드 & 페이지 타임아웃/로그 패치 버전
+
+# --- runtime dep bootstrap: install pandas/numpy/openpyxl etc. if missing ---
+import sys, subprocess
+try:
+    import pandas  # noqa: F401
+    import numpy   # noqa: F401
+    import openpyxl  # noqa: F401
+except ModuleNotFoundError:
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install", "--upgrade",
+        "pandas", "numpy", "openpyxl",
+        "google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib",
+        "python-dateutil", "pytz", "tzdata", "et-xmlfile"
+    ])
+
 from pathlib import Path
-
 import pandas as pd
-import streamlit as st
-
-import folium
-from streamlit_folium import st_folium
-
-import gspread
+import numpy as np
+import json, os, base64
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 from google.oauth2.service_account import Credentials
 
+def log(msg):
+    print(msg, flush=True)
 
-# ====== 사용자 환경 값 ======
-SERVICE_ACCOUNT_FILE = r"D:\OneDrive\office work\naver crawling\naver-crawling-476404-fcf4b10bc63e 클라우드 서비스계정.txt"
-SPREADSHEET_ID = "1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE"
+# 폴더 매핑 (공유드라이브 내부 구조)
+FOLDER_MAP = {
+    '아파트': '아파트',
+    '단독다가구': '단독다가구',
+    '연립다세대': '연립다세대',
+    '오피스텔': '오피스텔',
+    '상업업무용': '상업업무용',
+    '토지': '토지',
+    '공장창고등': '공장창고등'
+}
 
-TAB_LISTING = "매매물건 목록"
-TAB_LOC = "압구정 위치정보"
-TAB_TRADE = "거래내역"
-# ==========================
-
-
-def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [str(c).replace("\n", "").strip() for c in df.columns]
-    return df
-
-
-def dong_key(x) -> str:
-    if pd.isna(x):
-        return ""
-    s = str(x)
-    m = re.findall(r"\d+", s)
-    return m[0].lstrip("0") if m else s.strip()
+DRIVE_ROOT_ID = os.getenv('GDRIVE_FOLDER_ID', '').strip()
+GDRIVE_BASE_PATH = os.getenv('GDRIVE_BASE_PATH', '').strip()  # 예: "부동산 실거래자료" 또는 "부동산자료/부동산 실거래자료"
 
 
-def norm_area(x) -> str:
-    """'1', '1구역', '01구역' => '1' 로 통일"""
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
-    s = str(x).strip()
-    m = re.findall(r"\d+", s)
-    if not m:
-        return s
-    return m[0].lstrip("0") or "0"
-
-
-def norm_text(x: str) -> str:
-    """단지명 비교용 정규화"""
-    if x is None:
-        return ""
-    s = str(x).strip().lower()
-    s = s.replace("아파트", "").replace("apt", "").replace("apartment", "")
-    s = re.sub(r"\s+", "", s)
-    s = re.sub(r"[(){}\[\]\-_/·.,]", "", s)
-    return s
-
-
-def norm_size(x: str) -> str:
-    """평형 비교용 정규화"""
-    if x is None:
-        return ""
-    s = str(x).strip().lower()
-    s = s.replace("㎡", "").replace("m2", "").replace("m²", "").replace("평", "")
-    s = re.sub(r"\s+", "", s)
-    return s
-
-
-def parse_pyeong_num(x) -> float | None:
-    """'35평', '35', '35.5평' -> 35.5"""
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return None
-    s = str(x).strip()
-    m = re.search(r"(\d+(?:\.\d+)?)", s)
-    if not m:
-        return None
+def load_sa():
+    raw = os.getenv('GCP_SERVICE_ACCOUNT_KEY', '').strip()
+    if not raw:
+        raise RuntimeError('Service account key missing')
     try:
-        return float(m.group(1))
-    except Exception:
-        return None
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = json.loads(base64.b64decode(raw).decode('utf-8'))
+    return Credentials.from_service_account_info(data, scopes=['https://www.googleapis.com/auth/drive'])
+
+# ----- 폴더 탐색 유틸(생성하지 않고 '찾기만') -----
+
+def find_child_folder_id(svc, parent_id: str, name: str):
+    q = (
+        f"name='{name}' and '{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    )
+    resp = (
+        svc.files()
+        .list(q=q, spaces='drive', fields='files(id,name)', supportsAllDrives=True, includeItemsFromAllDrives=True)
+        .execute()
+    )
+    files = resp.get('files', [])
+    return files[0]['id'] if files else None
 
 
-def pyeong_bucket_10(pyeong: float | None) -> int | None:
-    """35.5 -> 30 (30평대). NaN도 안전 처리."""
-    if pyeong is None or pd.isna(pyeong):
-        return None
-    return int(float(pyeong) // 10) * 10
+def resolve_path(svc, start_parent_id: str, path: str):
+    current = start_parent_id
+    if not path:
+        return current
+    for seg in [p for p in path.split('/') if p.strip()]:
+        found = find_child_folder_id(svc, current, seg.strip())
+        if not found:
+            return None
+        current = found
+    return current
 
 
-def to_float(x):
-    try:
-        return float(x)
-    except Exception:
-        return None
+def detect_base_parent_id(svc):
+    # 1) 환경변수 기준
+    if GDRIVE_BASE_PATH:
+        bp = resolve_path(svc, DRIVE_ROOT_ID, GDRIVE_BASE_PATH)
+        if bp:
+            return bp
+    # 2) 기본 폴더명 추정
+    guess = find_child_folder_id(svc, DRIVE_ROOT_ID, "부동산 실거래자료")
+    return guess or DRIVE_ROOT_ID
+
+# ===== 업로드 유틸 =====
+
+def _guess_mimetype(file_path: Path) -> str:
+    ext = file_path.suffix.lower()
+    if ext == ".xlsx":
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if ext == ".csv":
+        return "text/csv"
+    return "application/octet-stream"
 
 
-def fmt_decimal(x, nd=2) -> str:
-    """59.500000 -> 59.5 / 62.100000 -> 62.1"""
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
-    num = pd.to_numeric(x, errors="coerce")
-    if pd.isna(num):
-        return str(x)
-    return f"{num:.{nd}f}".rstrip("0").rstrip(".")
-
-
-def to_eok_display(value) -> str:
-    """원 단위면 억으로 환산, 이미 억이면 그대로"""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return ""
-    num = pd.to_numeric(value, errors="coerce")
-    if pd.isna(num):
-        return ""
-    if num >= 1e8:
-        num = num / 1e8
-    return fmt_decimal(num, nd=2)
-
-
-def make_circle_label_html(label: str, bg_color: str) -> str:
-    size = 30
-    return f"""
-    <div style="
-        background:{bg_color};
-        width:{size}px;height:{size}px;
-        border-radius:50%;
-        border:2px solid rgba(0,0,0,0.45);
-        display:flex;align-items:center;justify-content:center;
-        font-weight:700;font-size:14px;
-        color:#ffffff;
-        box-shadow:0 1px 4px rgba(0,0,0,0.35);
-        ">
-        {label}
-    </div>
+def upload_processed(file_path: Path, prop_kind: str):
+    """전처리된 파일(xlsx 또는 csv)을 기존 공유드라이브 경로로 덮어쓰기 업로드.
+    - 폴더는 새로 만들지 않음(경로 없으면 스킵하고 로그 남김).
+    경로 규칙: DRIVE_ROOT_ID /(GDRIVE_BASE_PATH 또는 자동탐지)/ <종목폴더>
     """
+    if not file_path.exists():
+        log(f"  - drive: skip (file not found): {file_path}")
+        return
+    if not DRIVE_ROOT_ID:
+        log("  - drive: skip (missing DRIVE_ROOT_ID/GDRIVE_FOLDER_ID)")
+        return
+    try:
+        creds = load_sa()
+    except Exception as e:
+        log(f"  - drive: skip (SA load error): {e}")
+        return
+
+    svc = build('drive', 'v3', credentials=creds, cache_discovery=False)
+
+    # ① 베이스 경로 자동 결정
+    base_parent_id = detect_base_parent_id(svc)
+    if not base_parent_id:
+        log(f"  - drive: skip (base path not found): {GDRIVE_BASE_PATH}")
+        return
+
+    # ② 종목 폴더 찾기 (새로 만들지 않음)
+    subfolder = FOLDER_MAP.get(prop_kind, prop_kind)
+    folder_id = find_child_folder_id(svc, base_parent_id, subfolder)
+    if not folder_id:
+        log(f"  - drive: skip (category folder missing): {GDRIVE_BASE_PATH or '자동탐지 베이스'}/{subfolder}")
+        return
+
+    name = file_path.name
+    mimetype = _guess_mimetype(file_path)
+    media = MediaFileUpload(file_path.as_posix(), mimetype=mimetype)
+
+    # 풀 경로 형태 로그
+    try:
+        root_meta = svc.files().get(fileId=DRIVE_ROOT_ID, fields='id,name').execute()
+        base_meta = svc.files().get(fileId=base_parent_id, fields='id,name,parents').execute()
+        base_name = base_meta.get('name','')
+        root_name = root_meta.get('name','')
+    except Exception:
+        base_name = GDRIVE_BASE_PATH or ''
+        root_name = ''
+
+    # === 여기부터 디버그 정보 확장 ===
+    q = f"name='{name}' and '{folder_id}' in parents and trashed=false"
+    resp = svc.files().list(
+        q=q, spaces='drive', fields='files(id,name)',
+        supportsAllDrives=True, includeItemsFromAllDrives=True
+        q=q,
+        spaces='drive',
+        fields='files(id,name,parents,webViewLink,modifiedTime)',
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
+    ).execute()
+    files = resp.get('files', [])
+
+    path_parts = [p for p in [root_name, base_name, subfolder, name] if p]
+    full_path_for_log = "/".join(path_parts) if path_parts else f"{subfolder}/{name}"
+    log(f"  - drive target: {full_path_for_log} (https://drive.google.com/drive/folders/{folder_id})")
+
+    if files:
+        fid = files[0]['id']
+        svc.files().update(fileId=fid, media_body=media, supportsAllDrives=True).execute()
+        res = svc.files().update(
+            fileId=fid,
+            media_body=media,
+            supportsAllDrives=True,
+            fields='id,name,parents,webViewLink,modifiedTime'
+        ).execute()
+        log(f"  - drive: overwritten (update) -> {full_path_for_log}")
+        log(f"    · file id      = {res.get('id')}")
+        log(f"    · webViewLink  = {res.get('webViewLink')}")
+        log(f"    · modifiedTime = {res.get('modifiedTime')}")
+    else:
+        meta = {'name': name, 'parents': [folder_id]}
+        svc.files().create(body=meta, media_body=media, fields='id', supportsAllDrives=True).execute()
+        res = svc.files().create(
+            body=meta,
+            media_body=media,
+            fields='id,name,parents,webViewLink,modifiedTime',
+            supportsAllDrives=True
+        ).execute()
+        log(f"  - drive: uploaded (create) -> {full_path_for_log}")
+        log(f"    · file id      = {res.get('id')}")
+        log(f"    · webViewLink  = {res.get('webViewLink')}")
+        log(f"    · modifiedTime = {res.get('modifiedTime')}")
+
+# ==================== 다운로드/전처리/셀레니움 ====================
+import re, time
+from datetime import date, timedelta, datetime
+from typing import Optional, Tuple
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.alert import Alert
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
+
+URL = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
+OUT_DIR = Path(os.getenv("OUT_DIR", "output")).resolve(); OUT_DIR.mkdir(parents=True, exist_ok=True)
+TMP_DIR = (Path.cwd() / "_rt_downloads").resolve(); TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+IS_CI = os.getenv("CI", "") == "1"
+DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "30"))
+CLICK_RETRY_MAX  = int(os.getenv("CLICK_RETRY_MAX", "15"))
+CLICK_RETRY_WAIT = float(os.getenv("CLICK_RETRY_WAIT", "1"))
+# ↑ 다운로드 클릭 재시도 대기
+NAV_RETRY_MAX   = int(os.getenv("NAV_RETRY_MAX", "6"))  # ★ 추가: 탭 네비게이션 재시도 횟수(기본 6회)
+
+PROPERTY_TYPES = ["아파트","연립다세대","단독다가구","오피스텔","상업업무용","토지","공장창고등"]
+TAB_IDS = {"아파트":"xlsTab1","연립다세대":"xlsTab2","단독다가구":"xlsTab3","오피스텔":"xlsTab4","상업업무용":"xlsTab6","토지":"xlsTab7","공장창고등":"xlsTab8"}
+TAB_TEXT = {"아파트":"아파트","연립다세대":"연립/다세대","단독다가구":"단독/다가구","오피스텔":"오피스텔","상업업무용":"상업/업무용","토지":"토지","공장창고등":"공장/창고 등"}
+
+# ---------- 날짜 유틸 ----------
+
+def today_kst() -> date:
+    return (datetime.utcnow() + timedelta(hours=9)).date()
 
 
-def pick_first_existing_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    for c in candidates:
-        if c in df.columns:
-            return c
+def month_first(d: date) -> date:
+    return date(d.year, d.month, 1)
+
+
+def shift_months(d: date, k: int) -> date:
+    y = d.year + (d.month - 1 + k) // 12
+    m = (d.month - 1 + k) % 12 + 1
+    return date(y, m, 1)
+
+# ---------- 크롬 ----------
+
+def build_driver(download_dir: Path) -> webdriver.Chrome:
+    opts = Options()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--disable-notifications")
+    opts.add_argument("--window-size=1400,900")
+    opts.add_argument("--lang=ko-KR")
+    # 자동화 탐지 완화 & 빠른 로드 전략
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.page_load_strategy = "eager"
+
+    prefs = {
+        "download.default_directory": str(download_dir),
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True
+    }
+    opts.add_experimental_option("prefs", prefs)
+
+    if os.getenv("CHROME_BIN"):
+        opts.binary_location = os.getenv("CHROME_BIN")
+
+    chromedriver_bin = os.getenv("CHROMEDRIVER_BIN")
+    if chromedriver_bin and Path(chromedriver_bin).exists():
+        service = Service(chromedriver_bin)
+    else:
+        from webdriver_manager.chrome import ChromeDriverManager
+        service = Service(ChromeDriverManager().install())
+
+    driver = webdriver.Chrome(service=service, options=opts)
+
+    # 페이지 하드 타임아웃
+    page_timeout = int(os.getenv("PAGELOAD_TIMEOUT", "20"))
+    driver.set_page_load_timeout(page_timeout)
+
+    try:
+        driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior":"allow","downloadPath": str(download_dir),"eventsEnabled": True})
+    except Exception:
+        pass
+    return driver
+
+# ---------- 페이지 조작 ----------
+
+def _try_accept_alert(driver: webdriver.Chrome, wait=1.5) -> bool:
+    t0 = time.time()
+    while time.time() - t0 < wait:
+        try:
+            Alert(driver).accept(); return True
+        except Exception:
+            time.sleep(0.15)
+    return False
+
+
+def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=12, tab_label: Optional[str]=None) -> bool:
+    try:
+        WebDriverWait(driver, wait_sec).until(lambda d: d.execute_script("return document.readyState") == "complete")
+        WebDriverWait(driver, wait_sec).until(EC.presence_of_element_located((By.CSS_SELECTOR, "ul.quarter-tab-cover")))
+    except Exception as e:
+        log(f"  - tab container wait failed: {e}"); return False
+    # 1) 표준 클릭
+    try:
+        el = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.ID, tab_id)))
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+        driver.execute_script("arguments[0].click();", el); time.sleep(0.2)
+        active = driver.execute_script("var e=document.getElementById(arguments[0]);return e&&e.parentElement&&e.parentElement.classList.contains('on');", tab_id)
+        if active: return True
+    except Exception:
+        pass
+    # 2) JS 직접 클릭
+    try:
+        clicked = driver.execute_script("var el=document.getElementById(arguments[0]); if(el&&el.offsetParent!==null){el.scrollIntoView({block:'center'}); el.click(); return true;} return false;", tab_id)
+        if clicked:
+            time.sleep(0.2)
+            active = driver.execute_script("var e=document.getElementById(arguments[0]);return e&&e.parentElement&&e.parentElement.classList.contains('on');", tab_id)
+            if active: return True
+    except Exception:
+        pass
+    # 3) 라벨로 매칭
+    try:
+        lbl = tab_label or next((TAB_TEXT[k] for k,v in TAB_IDS.items() if v==tab_id), None)
+        if lbl:
+            js = "var lbl=arguments[0]; var as=document.querySelectorAll('ul.quarter-tab-cover a'); for(var i=0;i<as.length;i++){var t=as[i].textContent.trim(); if(t===lbl){as[i].scrollIntoView({block:'center'}); as[i].click(); return true;}} return false;"
+            if driver.execute_script(js, lbl):
+                time.sleep(0.2); return True
+    except Exception:
+        pass
+    log("  - tab click failed: all strategies"); return False
+
+# ---------- 날짜 입력 찾기/설정 ----------
+import re
+from typing import Tuple, Optional
+from selenium.webdriver.common.keys import Keys
+
+
+def _looks_like_date_input(el) -> bool:
+    typ = (el.get_attribute("type") or "").lower()
+    ph  = (el.get_attribute("placeholder") or "").lower()
+    val = (el.get_attribute("value") or "").lower()
+    name= (el.get_attribute("name") or "").lower()
+    id_ = (el.get_attribute("id") or "").lower()
+    txt = " ".join([ph, val, name, id_])
+    return (
+        typ in ("date", "text", "") and (
+            re.search(r"\d{4}-\d{2}-\d{2}", ph) or
+            re.search(r"\d{4}-\d{2}-\d{2}", val) or
+            "yyyy" in ph or "yyyy-mm-dd" in ph or
+            any(k in txt for k in ["start","end","from","to","srchbgnde","srchendde"])
+        )
+    )
+
+
+def _find_inputs_current_context(driver) -> Optional[Tuple]:
+    pairs = [
+        ("#srchBgnDe", "#srchEndDe"),
+        ("input[name='srchBgnDe']", "input[name='srchEndDe']"),
+    ]
+    for sel_s, sel_e in pairs:
+        try:
+            s = driver.find_element(By.CSS_SELECTOR, sel_s)
+            e = driver.find_element(By.CSS_SELECTOR, sel_e)
+            return (s, e)
+        except Exception:
+            pass
+    inputs = driver.find_elements(By.CSS_SELECTOR, "input")
+    cands = [el for el in inputs if _looks_like_date_input(el)]
+    if len(cands) >= 2:
+        return cands[0], cands[1]
+    dates = [e for e in inputs if (e.get_attribute("type") or "").lower() == "date"]
+    if len(dates) >= 2:
+        return dates[0], dates[1]
     return None
 
 
-@st.cache_data(ttl=600)
-def load_data():
-    sa_text = Path(SERVICE_ACCOUNT_FILE).read_text(encoding="utf-8").strip()
-    sa = json.loads(sa_text)
+def find_date_inputs(driver) -> Tuple:
+    driver.switch_to.default_content()
+    _try_accept_alert(driver, 1.0)
+    pair = _find_inputs_current_context(driver)
+    if pair:
+        return pair
 
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets.readonly",
-        "https://www.googleapis.com/auth/drive.readonly",
+    frames = driver.find_elements(By.CSS_SELECTOR, "iframe,frame")
+    for fr in frames:
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(fr)
+            pair = _find_inputs_current_context(driver)
+            if pair:
+                return pair
+        except Exception:
+            continue
+
+    driver.switch_to.default_content()
+    raise RuntimeError("날짜 입력 박스를 찾지 못했습니다.")
+
+
+def _type_and_verify(el, val: str) -> bool:
+    try:
+        el.click()
+        el.send_keys(Keys.CONTROL, 'a')
+        el.send_keys(Keys.DELETE)
+        el.send_keys(val)
+        time.sleep(0.1)
+        el.send_keys(Keys.TAB)
+        time.sleep(0.1)
+        return (el.get_attribute("value") or "").strip() == val
+    except Exception:
+        return False
+
+
+def _ensure_value_with_js(driver, el, val: str) -> bool:
+    try:
+        driver.execute_script("""
+            const el = arguments[0], v = arguments[1];
+        el.value = v;
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+        el.blur();
+        """, el, val)
+        time.sleep(0.1)
+        return (el.get_attribute("value") or "").strip() == val
+    except Exception:
+        return False
+
+
+def set_dates(driver, start: date, end: date):
+    _try_accept_alert(driver, 1.0)
+    s_el, e_el = find_date_inputs(driver)
+    s_val = start.isoformat()
+    e_val = end.isoformat()
+    ok_s = _type_and_verify(s_el, s_val) or _ensure_value_with_js(driver, s_el, s_val)
+    ok_e = _type_and_verify(e_el, e_val) or _ensure_value_with_js(driver, e_el, e_val)
+    if not ok_s or not ok_e:
+        sv = (s_el.get_attribute("value") or "").strip()
+        ev = (e_el.get_attribute("value") or "").strip()
+        log(f"  - warn: date fill verify failed. want=({s_val},{e_val}) got=({sv},{ev})")
+    assert (s_el.get_attribute("value") or "").strip() == s_val
+    assert (e_el.get_attribute("value") or "").strip() == e_val
+
+# ---------- 다운로드 클릭/대기 ----------
+
+def _click_by_locators(driver, label: str) -> bool:
+    locators = [
+        (By.XPATH, f"//button[normalize-space()='{label}']"),
+        (By.XPATH, f"//a[normalize-space()='{label}']"),
+        (By.XPATH, f"//input[@type='button' and @value='{label}']"),
+        (By.XPATH, "//*[contains(@onclick,'excel') and (self::a or self::button or self::input)]"),
+        (By.XPATH, "//*[@id='excelDown' or @id='btnExcel' or contains(@id,'excel')]")
     ]
-    creds = Credentials.from_service_account_info(sa, scopes=scopes)
-    gc = gspread.authorize(creds)
-
-    sh = gc.open_by_key(SPREADSHEET_ID)
-
-    ws_list = sh.worksheet(TAB_LISTING)
-    ws_loc = sh.worksheet(TAB_LOC)
-
-    df_list = pd.DataFrame(ws_list.get_all_records())
-    df_loc = pd.DataFrame(ws_loc.get_all_records())
-
-    try:
-        ws_trade = sh.worksheet(TAB_TRADE)
-        df_trade = pd.DataFrame(ws_trade.get_all_records())
-    except Exception:
-        df_trade = pd.DataFrame()
-
-    return clean_columns(df_list), clean_columns(df_loc), clean_columns(df_trade), sa.get("client_email", "")
+    for by, q in locators:
+        try:
+            els = driver.find_elements(by, q)
+            for el in els:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                time.sleep(0.05)
+                el.click()
+                _try_accept_alert(driver, 2.0)
+                return True
+        except Exception:
+            continue
+    return False
 
 
-def build_grouped(df_active: pd.DataFrame) -> pd.DataFrame:
-    g = (
-        df_active.groupby(["단지명", "동_key"], dropna=False)
-        .agg(
-            구역=("구역", "first"),
-            위도=("위도", "first"),
-            경도=("경도", "first"),
-            활성건수=("동_key", "size"),
-            최저가격=("가격", lambda s: pd.to_numeric(s, errors="coerce").min()),
-            최고가격=("가격", lambda s: pd.to_numeric(s, errors="coerce").max()),
-        )
-        .reset_index()
-    )
-    return g
+def click_download(driver, kind="excel") -> bool:
+    label = "EXCEL 다운" if kind == "excel" else "CSV 다운"
+    _try_accept_alert(driver, 1.0)
+    if _click_by_locators(driver, label):
+        _try_accept_alert(driver, 3.0)
+        return True
+    for fn in ["excelDown","xlsDown","excelDownload","fnExcel","fnExcelDown","fncExcel"]:
+        try:
+            driver.execute_script(f"if (typeof {fn}==='function') {fn}();")
+            _try_accept_alert(driver, 3.0)
+            return True
+        except Exception:
+            continue
+    return False
 
 
-def summarize_area_by_size(df_active: pd.DataFrame, area_value: str) -> pd.DataFrame:
-    if not area_value:
+def wait_download(dldir: Path, before: set, timeout: int) -> Path:
+    endt = time.time() + timeout
+    while time.time() < endt:
+        allf = set(p for p in dldir.glob("*") if p.is_file())
+        newf = [p for p in allf - before if not p.name.endswith(".crdownload")]
+        if newf:
+            return max(newf, key=lambda p: p.stat().st_mtime)
+        time.sleep(0.5)
+    raise TimeoutError("download not detected within timeout")
+
+# ---------- 전처리 ----------
+from openpyxl.utils import get_column_letter
+
+
+def _read_excel_first_table(path: Path) -> pd.DataFrame:
+    raw = pd.read_excel(path, engine="openpyxl", header=None, dtype=str).fillna("")
+    df = raw.iloc[12:].copy().reset_index(drop=True)
+    if df.empty:
         return pd.DataFrame()
-
-    target = norm_area(area_value)
-    df_area = df_active.copy()
-    df_area["_area_norm"] = df_area["구역"].astype(str).map(norm_area)
-    df_area = df_area[df_area["_area_norm"] == target].copy()
-    if df_area.empty:
-        return pd.DataFrame()
-
-    size_key = "평형대" if "평형대" in df_area.columns else ("평형" if "평형" in df_area.columns else None)
-    if not size_key:
-        return pd.DataFrame()
-
-    df_area["가격_num"] = pd.to_numeric(df_area["가격"], errors="coerce")
-    s = (
-        df_area.groupby(size_key, dropna=False)
-        .agg(
-            매물건수=("가격_num", "size"),
-            최저가격=("가격_num", "min"),
-            최고가격=("가격_num", "max"),
-        )
-        .reset_index()
-        .rename(columns={size_key: "평형"})
-    )
-
-    s["평형_sort"] = s["평형"].astype(str)
-    s = s.sort_values(by="평형_sort").drop(columns=["평형_sort"]).reset_index(drop=True)
-    for c in ["최저가격", "최고가격"]:
-        s[c] = s[c].round(0)
-
-    s["가격대(최저~최고)"] = (
-        s["최저가격"].fillna(0).astype(int).astype(str) + " ~ " + s["최고가격"].fillna(0).astype(int).astype(str)
-    )
-    return s
+    if df.shape[1] >= 1:
+        df = df.iloc[:, 1:].copy()  # A열 제거
+    header = df.iloc[0].astype(str).str.strip().tolist()
+    df = df.iloc[1:].copy()
+    df.columns = [str(c).strip() for c in header]
+    df = df.loc[:, [c for c in df.columns if str(c).strip() != ""]]
+    return df.reset_index(drop=True)
 
 
-def recent_trades(df_trade: pd.DataFrame, area: str, complex_name: str, pyeong_value: str) -> pd.DataFrame:
-    if df_trade is None or df_trade.empty:
-        return pd.DataFrame()
+def _drop_no_col(df: pd.DataFrame) -> pd.DataFrame:
+    for c in list(df.columns):
+        if str(c).strip().upper() == "NO":
+            df = df[df[c].astype(str).str.strip() != ""]
+            df = df.drop(columns=[c])
+            break
+    return df
 
-    col_area = pick_first_existing_column(df_trade, ["구역"])
-    col_complex = pick_first_existing_column(df_trade, ["단지", "단지명", "단지명(단지)"])
-    col_size = pick_first_existing_column(df_trade, ["평형", "평형대"])
-    col_date = pick_first_existing_column(df_trade, ["날짜", "거래일", "계약일", "일자", "거래일자"])
-    if not (col_area and col_complex and col_size and col_date):
-        return pd.DataFrame()
+# '시군구' 보존 + 파생 컬럼 추가
 
-    t = df_trade.copy()
-    t["_area_norm"] = t[col_area].astype(str).map(norm_area)
-    t["_complex_norm"] = t[col_complex].astype(str).map(norm_text)
-    t["_size_norm"] = t[col_size].astype(str).map(norm_size)
-
-    area_norm = norm_area(area)
-    complex_norm = norm_text(complex_name)
-    size_norm = norm_size(pyeong_value)
-
-    t = t[(t["_area_norm"] == area_norm) & (t["_complex_norm"] == complex_norm) & (t["_size_norm"] == size_norm)].copy()
-    if t.empty:
-        return pd.DataFrame()
-
-    t["_dt"] = pd.to_datetime(t[col_date], errors="coerce", infer_datetime_format=True)
-    t = t.dropna(subset=["_dt"]).sort_values("_dt", ascending=False).head(3).copy()
-
-    price_col = pick_first_existing_column(t, ["가격", "거래가격", "거래가", "실거래가", "금액", "거래금액"])
-    if price_col:
-        t["가격(억)"] = t[price_col].map(to_eok_display)
-
-    preferred = [col_date, col_area, col_complex, col_size]
-    if "가격(억)" in t.columns:
-        preferred.append("가격(억)")
-    for extra in ["동", "호", "비고"]:
-        if extra in t.columns and extra not in preferred:
-            preferred.append(extra)
-
-    out = t[preferred].copy()
-    out[col_area] = out[col_area].astype(str).map(lambda v: f"{norm_area(v)}구역" if norm_area(v) else str(v).strip())
-    return out
+def _split_sigungu(df: pd.DataFrame) -> pd.DataFrame:
+    if "시군구" not in df.columns:
+        return df
+    parts = df["시군구"].astype(str).str.split(expand=True, n=3)
+    for i, name in enumerate(["광역", "구", "법정동", "리"]):
+        if name not in df.columns:
+            df[name] = parts[i] if parts.shape[1] > i else ""
+    return df
 
 
-def resolve_clicked_meta(clicked_lat, clicked_lng, marker_rows):
-    """가장 가까운 마커로 매칭(미세 좌표 차이/히트박스 문제 완화)"""
-    if clicked_lat is None or clicked_lng is None:
-        return None
-    clat = float(clicked_lat)
-    clng = float(clicked_lng)
-
-    best_meta = None
-    best_d = None
-    for lat, lng, meta in marker_rows:
-        d = (float(lat) - clat) ** 2 + (float(lng) - clng) ** 2
-        if best_d is None or d < best_d:
-            best_d = d
-            best_meta = meta
-    return best_meta
+def _split_yymm(df: pd.DataFrame) -> pd.DataFrame:
+    if "계약년월" not in df.columns:
+        return df
+    s = df["계약년월"].astype(str).str.replace(r"\D", "", regex=True)
+    df["계약년"] = s.str.slice(0, 4)
+    df["계약월"] = s.str.slice(4, 6)
+    return df.drop(columns=["계약년월"])  # 원본 제거
 
 
-# ====== Streamlit UI ======
-st.set_page_config(layout="wide")
-st.title("압구정 매물 지도 MVP (상태=활성, 수동 갱신)")
-
-with st.sidebar:
-    st.subheader("필터")
-    only_active = st.checkbox("상태=활성만 표시", value=True)
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("데이터 새로고침"):
-            load_data.clear()
-            st.rerun()
-    with col_b:
-        if st.button("캐시만 비우기"):
-            load_data.clear()
-            st.success("캐시를 비웠습니다. (다음 실행 때 새로 로드)")
-
-    st.caption("지도는 클릭 이벤트만 수신(드래그/줌 시 자동 새로고침 없음).")
-
-
-# ====== Load ======
-df_list, df_loc, df_trade, client_email = load_data()
-if client_email:
-    st.sidebar.caption(f"서비스계정: {client_email}")
-
-# 층/호 보정
-if "층/호" not in df_list.columns and "층수" in df_list.columns:
-    df_list = df_list.copy()
-    df_list["층/호"] = df_list["층수"]
-
-need_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "상태"]
-missing = [c for c in need_cols if c not in df_list.columns]
-if missing:
-    st.error(f"'매매물건 목록' 탭에서 다음 컬럼이 필요합니다: {missing}")
-    st.stop()
-
-# 좌표 컬럼 확보
-df_list = df_list.copy()
-for c in ["위도", "경도"]:
-    if c not in df_list.columns:
-        df_list[c] = None
-
-df_list["동_key"] = df_list["동"].apply(dong_key)
-
-df_loc = df_loc.copy()
-if "동" in df_loc.columns:
-    df_loc["동_key"] = df_loc["동"].apply(dong_key)
-
-# 활성 필터
-df_view = df_list
-if only_active:
-    df_view = df_view[df_view["상태"].astype(str).str.strip() == "활성"].copy()
-
-# 좌표 숫자화
-df_view["위도"] = df_view["위도"].apply(to_float)
-df_view["경도"] = df_view["경도"].apply(to_float)
-
-# 위치정보 탭으로 좌표 보강
-if all(c in df_loc.columns for c in ["단지명", "동_key", "위도", "경도"]):
-    df_loc["위도"] = df_loc["위도"].apply(to_float)
-    df_loc["경도"] = df_loc["경도"].apply(to_float)
-
-    df_view = df_view.merge(
-        df_loc[["단지명", "동_key", "위도", "경도"]].rename(columns={"위도": "위도_loc", "경도": "경도_loc"}),
-        on=["단지명", "동_key"],
-        how="left",
-    )
-    df_view["위도"] = df_view["위도"].fillna(df_view["위도_loc"])
-    df_view["경도"] = df_view["경도"].fillna(df_view["경도_loc"])
-    df_view.drop(columns=["위도_loc", "경도_loc"], inplace=True)
-
-df_view = df_view.dropna(subset=["위도", "경도"]).copy()
-if df_view.empty:
-    st.warning("현재 표시할 활성 매물이 없거나 좌표가 없습니다.")
-    st.stop()
-
-# 평형대/가격 정규화 컬럼
-df_view = df_view.copy()
-df_view["가격_num"] = pd.to_numeric(df_view["가격"], errors="coerce")
-df_view["평형대_num"] = df_view["평형대"].map(parse_pyeong_num)
-df_view["평형대_bucket"] = df_view["평형대_num"].map(pyeong_bucket_10)
-df_view["가격(억)표시"] = df_view["가격_num"].map(lambda v: fmt_decimal(v, 2))
-
-# 그룹(동 단위 포인트)
-gdf = build_grouped(df_view)
-
-# 구역별 색상
-palette = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
-]
-areas = sorted([a for a in gdf["구역"].dropna().astype(str).unique()])
-area_color = {a: palette[i % len(palette)] for i, a in enumerate(areas)}
-default_color = "#333333"
-
-# ====== 지도 기본 줌 ======
-DEFAULT_ZOOM = 16
-
-# 상태 변수
-if "map_center" not in st.session_state:
-    st.session_state["map_center"] = [float(gdf["위도"].mean()), float(gdf["경도"].mean())]
-if "map_zoom" not in st.session_state:
-    st.session_state["map_zoom"] = DEFAULT_ZOOM
-if "selected_meta" not in st.session_state:
-    st.session_state["selected_meta"] = None
-if "last_click_sig" not in st.session_state:
-    st.session_state["last_click_sig"] = ""
-
-# 우측 하단 필터 상태
-if "quick_filter_mode" not in st.session_state:
-    st.session_state["quick_filter_mode"] = "size"  # "size" or "price"
-if "quick_filter_bucket" not in st.session_state:
-    st.session_state["quick_filter_bucket"] = 30  # 기본 30평대
-
-
-# ====== 지도 생성 ======
-m = folium.Map(
-    location=st.session_state["map_center"],
-    zoom_start=int(st.session_state["map_zoom"]),
-    tiles="CartoDB positron",
-)
-
-# 클릭 매칭용 목록
-marker_rows = []
-for _, r in gdf.iterrows():
-    marker_rows.append(
-        (r["위도"], r["경도"], {"단지명": r["단지명"], "동_key": r["동_key"], "구역": r["구역"], "위도": r["위도"], "경도": r["경도"]})
-    )
-
-# 마커: 투명 히트박스 + 라벨
-for _, r in gdf.iterrows():
-    area_raw = str(r["구역"]) if pd.notna(r["구역"]) else ""
-    bg = area_color.get(area_raw, default_color)
-    dong_label = str(r["동_key"])
-    area_display = f"{norm_area(area_raw)}구역" if norm_area(area_raw) else ""
-
-    tooltip = f"{area_display} | {r['단지명']} {dong_label}동 | 활성 {int(r['활성건수'])}건"
-
-    folium.CircleMarker(
-        location=[r["위도"], r["경도"]],
-        radius=18,
-        weight=0,
-        opacity=0,
-        fill=True,
-        fill_opacity=0,
-        tooltip=tooltip,
-    ).add_to(m)
-
-    folium.Marker(
-        location=[r["위도"], r["경도"]],
-        icon=folium.DivIcon(html=make_circle_label_html(dong_label, bg)),
-        tooltip=tooltip,
-    ).add_to(m)
-
-col_map, col_right = st.columns([1.1, 1])
-
-with col_map:
-    st.subheader("지도")
-    out = st_folium(
-        m,
-        height=650,
-        width=None,
-        returned_objects=["last_object_clicked"],
-        key="map",
-    )
-
-# 마커 클릭 처리(한 번 클릭으로 확정)
-if out:
-    clicked = out.get("last_object_clicked", None)
-    if clicked:
-        lat = clicked.get("lat")
-        lng = clicked.get("lng")
-        if lat is not None and lng is not None:
-            click_sig = f"{round(float(lat), 6)},{round(float(lng), 6)}"
-            if st.session_state["last_click_sig"] != click_sig:
-                meta = resolve_clicked_meta(lat, lng, marker_rows)
-                if meta:
-                    st.session_state["selected_meta"] = meta
-                    st.session_state["map_center"] = [float(meta["위도"]), float(meta["경도"])]
-                    st.session_state["map_zoom"] = int(st.session_state.get("map_zoom") or DEFAULT_ZOOM)
-                    st.session_state["last_click_sig"] = click_sig
-                    st.rerun()
-
-with col_right:
-    st.subheader("선택한 동의 활성 매물")
-
-    meta = st.session_state.get("selected_meta", None)
-    if not meta:
-        st.info("지도에서 마커를 클릭하면 우측에 상세가 표시됩니다.")
-        st.stop()
-
-    complex_name = meta["단지명"]
-    dong = meta["동_key"]
-    area_value = str(meta["구역"]) if pd.notna(meta["구역"]) else ""
-
-    df_pick = df_view[(df_view["단지명"] == complex_name) & (df_view["동_key"] == dong)].copy()
-
-    show_cols = ["평형대", "구역", "단지명", "평형", "대지지분", "동", "층/호", "가격", "부동산", "상태", "위도", "경도"]
-    show_cols = [c for c in show_cols if c in df_pick.columns]
-    st.dataframe(df_pick[show_cols], use_container_width=True)
-
-    st.divider()
-    st.subheader("선택 구역 평형별 요약 (활성 매물)")
-    if not area_value:
-        st.info("선택한 마커의 구역 정보가 없습니다.")
-    else:
-        summary = summarize_area_by_size(df_view, area_value)
-        if summary.empty:
-            st.info("해당 구역에서 요약할 데이터가 없습니다.")
-        else:
-            st.dataframe(
-                summary[["평형", "매물건수", "가격대(최저~최고)", "최저가격", "최고가격"]],
-                use_container_width=True,
+def _normalize_numbers(df: pd.DataFrame) -> pd.DataFrame:
+    for col in ["거래금액(만원)", "전용면적(㎡)", "면적(㎡)"]:
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str)
+                     .str.replace(r"[^0-9.\-]", "", regex=True)
+                     .replace({"": np.nan})
             )
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
 
-    st.divider()
-    st.subheader("거래내역 최신 3건 (구역/단지/평형 일치)")
 
-    pyeong_candidates = []
-    if "평형" in df_pick.columns:
-        pyeong_candidates = sorted(df_pick["평형"].astype(str).str.strip().dropna().unique().tolist())
-    elif "평형대" in df_pick.columns:
-        pyeong_candidates = sorted(df_pick["평형대"].astype(str).str.strip().dropna().unique().tolist())
+def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
+    target_order = [
+        "광역","구","법정동","리","계약년","계약월","계약일",
+        "시군구","번지","본번","부번","단지명","전용면적(㎡)",
+        "거래금액(만원)","동","층","매수자","매도자","건축년도",
+        "도로명","해제사유발생일","거래유형","중개사소재지","등기일자","주택유형"
+    ]
+    cols = list(df.columns)
+    ordered = [c for c in target_order if c in cols]
+    others = [c for c in cols if c not in ordered]
+    return df.reindex(columns=ordered + others)
 
-    if not pyeong_candidates:
-        st.info("선택한 동에서 평형 정보를 찾을 수 없습니다.")
-    else:
-        sel_key = f"sel_pyeong_{norm_text(complex_name)}_{dong}"
-        sel_pyeong = st.selectbox("평형 선택", pyeong_candidates, index=0, key=sel_key)
 
-        trades = recent_trades(df_trade, area_value, complex_name, sel_pyeong)
-        if trades.empty:
-            st.info("일치하는 거래내역이 없습니다.")
-        else:
-            st.dataframe(trades.style.set_properties(**{"color": "red"}), use_container_width=True)
+def _assert_preprocessed(df: pd.DataFrame):
+    cols = set(df.columns)
+    banned = [c for c in ["계약년월"] if c in cols]
+    if banned:
+        raise RuntimeError(f"전처리 실패: 금지 컬럼 잔존 {banned}")
+    for must in ["광역","구","법정동","계약년","계약월"]:
+        if must not in cols:
+            raise RuntimeError(f"전처리 실패: 필수 컬럼 누락 {must}")
 
-    # ====== 우측 하단: 빠른 필터/정렬 ======
-    st.divider()
-    st.subheader("빠른 필터 (활성 매물)")
 
-    c0, c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([1,1,1,1,1,1,1,1.2,1.2])
-
-    # 평형대 버튼
-    buckets = [20, 30, 40, 50, 60, 70, 80]
-    cols = [c0, c1, c2, c3, c4, c5, c6]
-    for col, b in zip(cols, buckets):
-        if col.button(f"{b}평대", use_container_width=True):
-            st.session_state["quick_filter_mode"] = "size"
-            st.session_state["quick_filter_bucket"] = b
-            st.rerun()
-
-    # 가격순 버튼(전체)
-    if c7.button("가격순", use_container_width=True):
-        st.session_state["quick_filter_mode"] = "price"
-        st.rerun()
-
-    # 현재 모드 안내
-    mode = st.session_state["quick_filter_mode"]
-    if mode == "size":
-        st.caption(f"현재: {st.session_state['quick_filter_bucket']}평대 (가격 낮은 순)")
-    else:
-        st.caption("현재: 전체 (가격 낮은 순)")
-
-    # 필터링 데이터 만들기
-    dfq = df_view.copy()
-    dfq = dfq[dfq["가격_num"].notna()].copy()
-
-    if mode == "size":
-        b = st.session_state["quick_filter_bucket"]
-        dfq = dfq[dfq["평형대_bucket"] == b].copy()
-
-    dfq = dfq.sort_values("가격_num", ascending=True).reset_index(drop=True)
-
-    # 표 표시 컬럼(스크롤)
-    display_cols = ["구역", "평형대", "단지명", "동", "층/호", "가격(억)표시", "부동산"]
-    display_cols = [c for c in display_cols if c in dfq.columns]
-    df_show = dfq[display_cols + ["위도", "경도", "동_key"]].copy()  # 이동용 좌표 포함(표에는 숨기려면 아래에서 제거)
-
-    # 표에는 좌표 숨기기
-    df_table = df_show[display_cols].copy()
-    df_table = df_table.rename(columns={"가격(억)표시": "가격(억)"})
-
-    st.markdown("선택한 행을 클릭하면 해당 동 위치로 지도가 이동합니다.")
-    event = st.dataframe(
-        df_table,
-        height=260,
-        use_container_width=True,
-        on_select="rerun",
-        selection_mode="single-row",
+def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
+    return _reorder_columns(
+        _normalize_numbers(
+            _split_yymm(
+                _split_sigungu(
+                    _drop_no_col(df)
+                )
+            )
+        )
     )
 
-    # 행 선택 시 지도 이동 + 동 선택 변경
+
+def save_excel(path: Path, df: pd.DataFrame):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="data")
+        ws = writer.sheets["data"]
+        for idx, col in enumerate(df.columns, start=1):
+            series = df[col]
+            try:
+                max_len = max(
+                    [len(str(col))] +
+                    [len(str(x)) if x is not None else 0 for x in series.tolist()]
+                )
+            except Exception:
+                max_len = len(str(col))
+            width = min(80, max(8, max_len + 2))
+            from openpyxl.utils import get_column_letter
+            ws.column_dimensions[get_column_letter(idx)].width = width
+
+
+def save_csv(path: Path, df: pd.DataFrame):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False, encoding="utf-8-sig")
+
+# ---------- 파이프라인 ----------
+
+def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end: date, outname: str):
+    # 진입/세팅(최대 3회 재시도)
+    for nav_try in range(1, NAV_RETRY_MAX + 1):
+        driver.switch_to.default_content()
+        log(f"  - nav{nav_try}: opening page {URL}")
+        try:
+            driver.get(URL)
+        except TimeoutException:
+            log(f"  - nav{nav_try}: driver.get timeout -> window.stop() 시도")
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+
+        time.sleep(0.6)
+        log(f"  - nav{nav_try}: clicking tab {prop_kind}")
+        if not click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind)):
+            log(f"  - nav{nav_try}: tab click failed, retrying...")
+            if nav_try == NAV_RETRY_MAX:
+                raise RuntimeError("탭 진입 실패")
+            continue
+
+        log(f"  - nav{nav_try}: setting dates {start} ~ {end}")
+        try:
+            set_dates(driver, start, end)
+            log(f"  - nav{nav_try}: dates set OK")
+            break
+        except Exception as e:
+            log(f"  - warn: navigate/tab/set_dates retry ({nav_try}/{NAV_RETRY_MAX}): {e}")
+            if nav_try == NAV_RETRY_MAX:
+                raise
+            time.sleep(0.6)
+
+    before = set(p for p in TMP_DIR.glob("*") if p.is_file())
+    got = None
+    for attempt in range(1, CLICK_RETRY_MAX + 1):
+        ok = click_download(driver, "excel")
+        log(f"  - [{prop_kind}] click_download(excel) / attempt {attempt}: {ok}")
+        if not ok:
+            time.sleep(CLICK_RETRY_WAIT)
+            if attempt % 5 == 0:
+                driver.switch_to.default_content()
+                log("  - refresh page for retry")
+                try:
+                    driver.get(URL)
+                except TimeoutException:
+                    log("  - refresh timeout; window.stop()")
+                    try:
+                        driver.execute_script("window.stop();")
+                    except Exception:
+                        pass
+                time.sleep(0.6)
+                click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind))
+                set_dates(driver, start, end)
+            continue
+        try:
+            got = wait_download(TMP_DIR, before, timeout=DOWNLOAD_TIMEOUT)
+            break
+        except TimeoutError:
+            log(f"  - warn: 다운로드 시작 감지 실패(시도 {attempt}/{CLICK_RETRY_MAX})")
+            if attempt % 5 == 0:
+                driver.switch_to.default_content()
+                log("  - refresh page for retry")
+                try:
+                    driver.get(URL)
+                except TimeoutException:
+                    log("  - refresh timeout; window.stop()")
+                    try:
+                        driver.execute_script("window.stop();")
+                    except Exception:
+                        pass
+                time.sleep(0.6)
+                click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind))
+                set_dates(driver, start, end)
+            continue
+
+    if not got:
+        raise RuntimeError("다운로드 실패")
+    log(f"  - got file: {got}  size={got.stat().st_size:,}  ext={got.suffix}")
+
+    # 전처리 → 저장 → 업로드
+    df = _read_excel_first_table(got)
+    df = preprocess_df(df)
+    log("  - 헤더(전처리 후): " + " | ".join([str(c) for c in df.columns.tolist()]))
+    log(f"  - 행/열 크기: {df.shape[0]} rows × {df.shape[1]} cols")
+    _assert_preprocessed(df)
+
+    # 동일 이름의 xlsx와 csv 동시 생성
+    out_xlsx = OUT_DIR / outname
+    out_csv  = OUT_DIR / (outname[:-5] + ".csv" if outname.lower().endswith(".xlsx") else (outname + ".csv"))
+
+    save_excel(out_xlsx, df)
+    save_csv(out_csv, df)
+
+    log(f"완료: [{prop_kind}] {out_xlsx}")
+    log(f"완료: [{prop_kind}] {out_csv}")
+
+    # 각각 덮어쓰기 업로드
+    upload_processed(out_xlsx, prop_kind)
+    upload_processed(out_csv,  prop_kind)
+
+# ---------- 메인 ----------
+
+def main():
+    t = today_kst()
+    bases = [shift_months(month_first(t), -i) for i in range(4, -1, -1)]  # 최근 3개월(당월 포함)
+    bases = [shift_months(month_first(t), -i) for i in range(4, -1, -1)]  # 최근 5개월(당월 포함)
+    driver = build_driver(TMP_DIR)
     try:
-        if event and event.selection and event.selection.rows:
-            ridx = event.selection.rows[0]
-            row = df_show.iloc[ridx]
+        for prop_kind in PROPERTY_TYPES:
+            for base in bases:
+                start = base
+                end = t if (base.year, base.month) == (t.year, t.month) else (shift_months(base, 1) - timedelta(days=1))
+                name = f"{prop_kind} {base:%Y%m}.xlsx"
+                log(f"[전국/{prop_kind}] {start} ~ {end} → {name}")
+                fetch_and_process(driver, prop_kind, start, end, name)
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
-            # 지도 이동
-            st.session_state["map_center"] = [float(row["위도"]), float(row["경도"])]
-            st.session_state["map_zoom"] = int(st.session_state.get("map_zoom") or DEFAULT_ZOOM)
-
-            # 우측 '선택한 동'도 같이 변경
-            st.session_state["selected_meta"] = {
-                "단지명": row["단지명"],
-                "동_key": row["동_key"],
-                "구역": row["구역"],
-                "위도": float(row["위도"]),
-                "경도": float(row["경도"]),
-            }
-            st.session_state["last_click_sig"] = ""  # 다음 클릭 정상 인식
-            st.rerun()
-    except Exception:
-        # Streamlit 버전/환경에 따라 event 구조가 다를 수 있어 안전 처리
-        pass
+if __name__ == "__main__":
+    main()
