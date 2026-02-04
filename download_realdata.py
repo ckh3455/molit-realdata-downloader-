@@ -572,7 +572,7 @@ def _read_excel_first_table(path: Path) -> pd.DataFrame:
     header = df.iloc[0].astype(str).str.strip().tolist()
     df = df.iloc[1:].copy()
     df.columns = [str(c).strip() for c in header]
-    df = df.loc[:, [c for c in df.columns if str(c).strip() != "")]
+    df = df.loc[:, [c for c in df.columns if str(c).strip() != ""]]
     return df.reset_index(drop=True)
 
 
