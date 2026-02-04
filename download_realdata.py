@@ -1,15 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-국토부 실거래 다운로더 — xlsx+csv 동시 업로드 & 페이지 타임아웃/로그 패치 버전 (FIXED)
+국토부 실거래 다운로더 — xlsx+csv 동시 업로드 & GitHub Actions 안정화 버전 (FIXED v2)
 
-주요 수정사항
-- google drive files().list() 호출부 SyntaxError(중복 인자/콤마 누락) 수정
-- Drive update/create 중복 호출 제거(각 1회로 정리)
-- bases 중복 대입 제거(최근 5개월 기준으로 통일)
-- 런타임 부트스트랩에 selenium/webdriver-manager 추가(미설치 환경 대비)
+이번 수정의 핵심
+- GitHub Actions 환경에서 런타임 pip 설치가 pandas 3.0.0을 끌어올리며(streamlit과 충돌),
+  openpyxl writer와의 API mismatch(TypeError: autofilter_range)까지 유발.
+- 해결: pandas를 <3로 고정(권장: 2.2.x), openpyxl을 >=3.1.x로 고정.
+- 또한, to_excel 실패 후 openpyxl 저장 단계에서 "At least one sheet must be visible"가 연쇄로 터지는 문제는
+  원인(TypeError) 제거로 해결됨.
+
+권장 운영 방식
+- 가능하면 런타임 부트스트랩 대신, GitHub Actions에서 requirements.txt로 설치하세요.
+- 그래도 부트스트랩이 필요하면 아래의 "고정 버전" 설치 리스트를 사용하세요.
 """
 
-# --- runtime dep bootstrap: install deps if missing ---
+# --- runtime dep bootstrap (pinned) ---
 import sys, subprocess
 try:
     import pandas  # noqa: F401
@@ -21,10 +26,21 @@ try:
 except ModuleNotFoundError:
     subprocess.check_call([
         sys.executable, "-m", "pip", "install", "--upgrade",
-        "pandas", "numpy", "openpyxl",
-        "selenium", "webdriver-manager",
-        "google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib",
-        "python-dateutil", "pytz", "tzdata", "et-xmlfile"
+        # ★ pandas 3 금지: streamlit(있다면)과도 충돌하고, openpyxl writer mismatch 유발 가능
+        "pandas>=1.5,<3",
+        "numpy>=1.23,<3",
+        # ★ openpyxl은 최신권장(특히 pandas 2.2+에서 안정)
+        "openpyxl>=3.1.2,<4",
+        "selenium>=4.15,<5",
+        "webdriver-manager>=4,<5",
+        "google-api-python-client>=2,<3",
+        "google-auth>=2,<3",
+        "google-auth-httplib2>=0.2,<1",
+        "google-auth-oauthlib>=1,<2",
+        "python-dateutil>=2.8",
+        "pytz",
+        "tzdata",
+        "et-xmlfile",
     ])
 
 from pathlib import Path
@@ -166,7 +182,7 @@ def upload_processed(file_path: Path, prop_kind: str):
         base_name = GDRIVE_BASE_PATH or ""
         root_name = ""
 
-    # ③ 동일 이름 파일 존재 여부 확인 (FIX: 중복 인자/문법 오류 제거)
+    # ③ 동일 이름 파일 존재 여부 확인
     q = f"name='{name}' and '{folder_id}' in parents and trashed=false"
     resp = svc.files().list(
         q=q,
@@ -183,7 +199,6 @@ def upload_processed(file_path: Path, prop_kind: str):
 
     if files:
         fid = files[0]["id"]
-        # FIX: update 1회만 수행
         res = svc.files().update(
             fileId=fid,
             media_body=media,
@@ -193,7 +208,6 @@ def upload_processed(file_path: Path, prop_kind: str):
         log(f"  - drive: overwritten (update) -> {full_path_for_log}")
     else:
         meta = {"name": name, "parents": [folder_id]}
-        # FIX: create 1회만 수행
         res = svc.files().create(
             body=meta,
             media_body=media,
@@ -228,10 +242,6 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 TMP_DIR = (Path.cwd() / "_rt_downloads").resolve()
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-# GitHub Actions: CI=true 가 기본
-_CI = (os.getenv("CI", "") or "").lower()
-IS_CI = _CI in ("1", "true", "yes", "y")
-
 DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "30"))
 CLICK_RETRY_MAX = int(os.getenv("CLICK_RETRY_MAX", "15"))
 CLICK_RETRY_WAIT = float(os.getenv("CLICK_RETRY_WAIT", "1"))
@@ -258,8 +268,6 @@ TAB_TEXT = {
 }
 
 
-# ---------- 날짜 유틸 ----------
-
 def today_kst() -> date:
     return (datetime.utcnow() + timedelta(hours=9)).date()
 
@@ -274,8 +282,6 @@ def shift_months(d: date, k: int) -> date:
     return date(y, m, 1)
 
 
-# ---------- 크롬 ----------
-
 def build_driver(download_dir: Path) -> webdriver.Chrome:
     opts = Options()
     opts.add_argument("--headless=new")
@@ -285,7 +291,6 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
     opts.add_argument("--disable-notifications")
     opts.add_argument("--window-size=1400,900")
     opts.add_argument("--lang=ko-KR")
-    # 자동화 탐지 완화 & 빠른 로드 전략
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.page_load_strategy = "eager"
 
@@ -309,11 +314,9 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
 
     driver = webdriver.Chrome(service=service, options=opts)
 
-    # 페이지 하드 타임아웃
     page_timeout = int(os.getenv("PAGELOAD_TIMEOUT", "20"))
     driver.set_page_load_timeout(page_timeout)
 
-    # 다운로드 허용(CDP)
     try:
         driver.execute_cdp_cmd(
             "Page.setDownloadBehavior",
@@ -323,8 +326,6 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
         pass
     return driver
 
-
-# ---------- 페이지 조작 ----------
 
 def _try_accept_alert(driver: webdriver.Chrome, wait=1.5) -> bool:
     t0 = time.time()
@@ -345,7 +346,6 @@ def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=12, tab_label: Opt
         log(f"  - tab container wait failed: {e}")
         return False
 
-    # 1) 표준 클릭
     try:
         el = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.ID, tab_id)))
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
@@ -360,7 +360,6 @@ def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=12, tab_label: Opt
     except Exception:
         pass
 
-    # 2) JS 직접 클릭
     try:
         clicked = driver.execute_script(
             "var el=document.getElementById(arguments[0]); if(el&&el.offsetParent!==null){el.scrollIntoView({block:'center'}); el.click(); return true;} return false;",
@@ -377,7 +376,6 @@ def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=12, tab_label: Opt
     except Exception:
         pass
 
-    # 3) 라벨로 매칭
     try:
         lbl = tab_label or next((TAB_TEXT[k] for k, v in TAB_IDS.items() if v == tab_id), None)
         if lbl:
@@ -394,8 +392,6 @@ def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=12, tab_label: Opt
     log("  - tab click failed: all strategies")
     return False
 
-
-# ---------- 날짜 입력 찾기/설정 ----------
 
 def _looks_like_date_input(el) -> bool:
     typ = (el.get_attribute("type") or "").lower()
@@ -510,8 +506,6 @@ def set_dates(driver, start: date, end: date):
     assert (e_el.get_attribute("value") or "").strip() == e_val
 
 
-# ---------- 다운로드 클릭/대기 ----------
-
 def _click_by_locators(driver, label: str) -> bool:
     locators = [
         (By.XPATH, f"//button[normalize-space()='{label}']"),
@@ -562,15 +556,13 @@ def wait_download(dldir: Path, before: set, timeout: int) -> Path:
     raise TimeoutError("download not detected within timeout")
 
 
-# ---------- 전처리 ----------
-
 def _read_excel_first_table(path: Path) -> pd.DataFrame:
     raw = pd.read_excel(path, engine="openpyxl", header=None, dtype=str).fillna("")
     df = raw.iloc[12:].copy().reset_index(drop=True)
     if df.empty:
         return pd.DataFrame()
     if df.shape[1] >= 1:
-        df = df.iloc[:, 1:].copy()  # A열 제거
+        df = df.iloc[:, 1:].copy()
     header = df.iloc[0].astype(str).str.strip().tolist()
     df = df.iloc[1:].copy()
     df.columns = [str(c).strip() for c in header]
@@ -603,7 +595,7 @@ def _split_yymm(df: pd.DataFrame) -> pd.DataFrame:
     s = df["계약년월"].astype(str).str.replace(r"\D", "", regex=True)
     df["계약년"] = s.str.slice(0, 4)
     df["계약월"] = s.str.slice(4, 6)
-    return df.drop(columns=["계약년월"])  # 원본 제거
+    return df.drop(columns=["계약년월"])
 
 
 def _normalize_numbers(df: pd.DataFrame) -> pd.DataFrame:
@@ -666,10 +658,7 @@ def save_csv(path: Path, df: pd.DataFrame):
     df.to_csv(path, index=False, encoding="utf-8-sig")
 
 
-# ---------- 파이프라인 ----------
-
 def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end: date, outname: str):
-    # 진입/세팅(NAV_RETRY_MAX 재시도)
     for nav_try in range(1, NAV_RETRY_MAX + 1):
         driver.switch_to.default_content()
         log(f"  - nav{nav_try}: opening page {URL}")
@@ -708,20 +697,6 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
         log(f"  - [{prop_kind}] click_download(excel) / attempt {attempt}: {ok}")
         if not ok:
             time.sleep(CLICK_RETRY_WAIT)
-            if attempt % 5 == 0:
-                driver.switch_to.default_content()
-                log("  - refresh page for retry")
-                try:
-                    driver.get(URL)
-                except TimeoutException:
-                    log("  - refresh timeout; window.stop()")
-                    try:
-                        driver.execute_script("window.stop();")
-                    except Exception:
-                        pass
-                time.sleep(0.6)
-                click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind))
-                set_dates(driver, start, end)
             continue
 
         try:
@@ -729,27 +704,12 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
             break
         except TimeoutError:
             log(f"  - warn: 다운로드 시작 감지 실패(시도 {attempt}/{CLICK_RETRY_MAX})")
-            if attempt % 5 == 0:
-                driver.switch_to.default_content()
-                log("  - refresh page for retry")
-                try:
-                    driver.get(URL)
-                except TimeoutException:
-                    log("  - refresh timeout; window.stop()")
-                    try:
-                        driver.execute_script("window.stop();")
-                    except Exception:
-                        pass
-                time.sleep(0.6)
-                click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind))
-                set_dates(driver, start, end)
-            continue
+            time.sleep(CLICK_RETRY_WAIT)
 
     if not got:
         raise RuntimeError("다운로드 실패")
     log(f"  - got file: {got}  size={got.stat().st_size:,}  ext={got.suffix}")
 
-    # 전처리 → 저장 → 업로드
     df = _read_excel_first_table(got)
     df = preprocess_df(df)
     log("  - 헤더(전처리 후): " + " | ".join([str(c) for c in df.columns.tolist()]))
@@ -769,12 +729,9 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
     upload_processed(out_csv, prop_kind)
 
 
-# ---------- 메인 ----------
-
 def main():
     t = today_kst()
-    # 최근 5개월(당월 포함): 4개월 전 ~ 현재월
-    bases = [shift_months(month_first(t), -i) for i in range(4, -1, -1)]
+    bases = [shift_months(month_first(t), -i) for i in range(4, -1, -1)]  # 최근 5개월(당월 포함)
 
     driver = build_driver(TMP_DIR)
     try:
