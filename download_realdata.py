@@ -148,6 +148,8 @@ def upload_processed(file_path: Path, prop_kind: str):
     # === 여기부터 디버그 정보 확장 ===
     q = f"name='{name}' and '{folder_id}' in parents and trashed=false"
     resp = svc.files().list(
+        q=q, spaces='drive', fields='files(id,name)',
+        supportsAllDrives=True, includeItemsFromAllDrives=True
         q=q,
         spaces='drive',
         fields='files(id,name,parents,webViewLink,modifiedTime)',
@@ -162,6 +164,7 @@ def upload_processed(file_path: Path, prop_kind: str):
 
     if files:
         fid = files[0]['id']
+        svc.files().update(fileId=fid, media_body=media, supportsAllDrives=True).execute()
         res = svc.files().update(
             fileId=fid,
             media_body=media,
@@ -174,6 +177,7 @@ def upload_processed(file_path: Path, prop_kind: str):
         log(f"    · modifiedTime = {res.get('modifiedTime')}")
     else:
         meta = {'name': name, 'parents': [folder_id]}
+        svc.files().create(body=meta, media_body=media, fields='id', supportsAllDrives=True).execute()
         res = svc.files().create(
             body=meta,
             media_body=media,
@@ -706,6 +710,7 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
 
 def main():
     t = today_kst()
+    bases = [shift_months(month_first(t), -i) for i in range(4, -1, -1)]  # 최근 3개월(당월 포함)
     bases = [shift_months(month_first(t), -i) for i in range(4, -1, -1)]  # 최근 5개월(당월 포함)
     driver = build_driver(TMP_DIR)
     try:
