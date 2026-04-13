@@ -644,23 +644,31 @@ def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def save_excel(path: Path, df: pd.DataFrame):
     path.parent.mkdir(parents=True, exist_ok=True)
+
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="data")
+
         ws = writer.sheets["data"]
-        from openpyxl.utils import get_column_letter
+
+        # 열너비 자동조정
         for idx, col in enumerate(df.columns, start=1):
             series = df[col]
             try:
-                max_len = max([len(str(col))] + [len(str(x)) if x is not None else 0 for x in series.tolist()])
+                max_len = max(
+                    [len(str(col))] +
+                    [len(str(x)) if x is not None else 0 for x in series.tolist()]
+                )
             except Exception:
                 max_len = len(str(col))
+
             width = min(80, max(8, max_len + 2))
+            from openpyxl.utils import get_column_letter
             ws.column_dimensions[get_column_letter(idx)].width = width
 
-
-def save_csv(path: Path, df: pd.DataFrame):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False, encoding="utf-8-sig")
+        # autofilter는 to_excel 인자가 아니라 시트 속성으로 설정
+        if ws.max_row >= 1 and ws.max_column >= 1:
+            from openpyxl.utils import get_column_letter
+            ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
 
 
 # ==================== 파이프라인 ====================
