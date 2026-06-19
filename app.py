@@ -1,198 +1,71 @@
 # -*- coding: utf-8 -*-
-# 국토부 실거래 다운로더 — xlsx+csv 동시 업로드 & 페이지 타임아웃/로그 패치 버전
+"""
+국토부 실거래 다운로더 — 디버그/탭진입 보강 수정본
 
-# --- runtime dep bootstrap: install pandas/numpy/openpyxl etc. if missing ---
-import sys, subprocess
-try:
-    import pandas  # noqa: F401
-    import numpy   # noqa: F401
-    import openpyxl  # noqa: F401
-except ModuleNotFoundError:
-    subprocess.check_call([
-        sys.executable, "-m", "pip", "install", "--upgrade",
-        "pandas", "numpy", "openpyxl",
-        "google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib",
-        "python-dateutil", "pytz", "tzdata", "et-xmlfile"
-    ])
+주요 보강:
+1) 국토부 페이지가 느리거나 headless에서 DOM 생성이 늦을 때를 대비해 대기 로직 완화
+2) 탭 컨테이너 ul.quarter-tab-cover 고정 의존 제거
+3) 실패 시 debug_rt_page.html / debug_rt_page.png 저장
+4) 필요 시 HEADLESS=0 으로 실제 크롬창을 띄워 확인 가능
+5) Google Drive 업로드 함수의 중복 list/update/create 호출 정리
+"""
+
+# --- runtime dep bootstrap ---
+import sys
+import subprocess
+
+REQUIRED_PACKAGES = [
+    "pandas",
+    "numpy",
+    "openpyxl",
+    "google-api-python-client",
+    "google-auth",
+    "google-auth-httplib2",
+    "google-auth-oauthlib",
+    "python-dateutil",
+    "pytz",
+    "tzdata",
+    "et-xmlfile",
+    "selenium",
+    "webdriver-manager",
+]
+
+def _ensure_packages():
+    missing = []
+    for pkg in REQUIRED_PACKAGES:
+        import_name = pkg.replace("-", "_")
+        if pkg == "google-api-python-client":
+            import_name = "googleapiclient"
+        elif pkg == "google-auth":
+            import_name = "google.auth"
+        elif pkg == "webdriver-manager":
+            import_name = "webdriver_manager"
+        try:
+            __import__(import_name)
+        except ModuleNotFoundError:
+            missing.append(pkg)
+
+    if missing:
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "--upgrade", *missing
+        ])
+
+_ensure_packages()
 
 from pathlib import Path
 import pandas as pd
 import numpy as np
-import json, os, base64
+import json
+import os
+import base64
+import re
+import time
+from datetime import date, timedelta, datetime
+from typing import Optional, Tuple
+
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.service_account import Credentials
-
-def log(msg):
-    print(msg, flush=True)
-
-# 폴더 매핑 (공유드라이브 내부 구조)
-FOLDER_MAP = {
-    '아파트': '아파트',
-    '단독다가구': '단독다가구',
-    '연립다세대': '연립다세대',
-    '오피스텔': '오피스텔',
-    '상업업무용': '상업업무용',
-    '토지': '토지',
-    '공장창고등': '공장창고등'
-}
-
-DRIVE_ROOT_ID = os.getenv('GDRIVE_FOLDER_ID', '').strip()
-GDRIVE_BASE_PATH = os.getenv('GDRIVE_BASE_PATH', '').strip()  # 예: "부동산 실거래자료" 또는 "부동산자료/부동산 실거래자료"
-
-
-def load_sa():
-    raw = os.getenv('GCP_SERVICE_ACCOUNT_KEY', '').strip()
-    if not raw:
-        raise RuntimeError('Service account key missing')
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        data = json.loads(base64.b64decode(raw).decode('utf-8'))
-    return Credentials.from_service_account_info(data, scopes=['https://www.googleapis.com/auth/drive'])
-
-# ----- 폴더 탐색 유틸(생성하지 않고 '찾기만') -----
-
-def find_child_folder_id(svc, parent_id: str, name: str):
-    q = (
-        f"name='{name}' and '{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
-    )
-    resp = (
-        svc.files()
-        .list(q=q, spaces='drive', fields='files(id,name)', supportsAllDrives=True, includeItemsFromAllDrives=True)
-        .execute()
-    )
-    files = resp.get('files', [])
-    return files[0]['id'] if files else None
-
-
-def resolve_path(svc, start_parent_id: str, path: str):
-    current = start_parent_id
-    if not path:
-        return current
-    for seg in [p for p in path.split('/') if p.strip()]:
-        found = find_child_folder_id(svc, current, seg.strip())
-        if not found:
-            return None
-        current = found
-    return current
-
-
-def detect_base_parent_id(svc):
-    # 1) 환경변수 기준
-    if GDRIVE_BASE_PATH:
-        bp = resolve_path(svc, DRIVE_ROOT_ID, GDRIVE_BASE_PATH)
-        if bp:
-            return bp
-    # 2) 기본 폴더명 추정
-    guess = find_child_folder_id(svc, DRIVE_ROOT_ID, "부동산 실거래자료")
-    return guess or DRIVE_ROOT_ID
-
-# ===== 업로드 유틸 =====
-
-def _guess_mimetype(file_path: Path) -> str:
-    ext = file_path.suffix.lower()
-    if ext == ".xlsx":
-        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    if ext == ".csv":
-        return "text/csv"
-    return "application/octet-stream"
-
-
-def upload_processed(file_path: Path, prop_kind: str):
-    """전처리된 파일(xlsx 또는 csv)을 기존 공유드라이브 경로로 덮어쓰기 업로드.
-    - 폴더는 새로 만들지 않음(경로 없으면 스킵하고 로그 남김).
-    경로 규칙: DRIVE_ROOT_ID /(GDRIVE_BASE_PATH 또는 자동탐지)/ <종목폴더>
-    """
-    if not file_path.exists():
-        log(f"  - drive: skip (file not found): {file_path}")
-        return
-    if not DRIVE_ROOT_ID:
-        log("  - drive: skip (missing DRIVE_ROOT_ID/GDRIVE_FOLDER_ID)")
-        return
-    try:
-        creds = load_sa()
-    except Exception as e:
-        log(f"  - drive: skip (SA load error): {e}")
-        return
-
-    svc = build('drive', 'v3', credentials=creds, cache_discovery=False)
-
-    # ① 베이스 경로 자동 결정
-    base_parent_id = detect_base_parent_id(svc)
-    if not base_parent_id:
-        log(f"  - drive: skip (base path not found): {GDRIVE_BASE_PATH}")
-        return
-
-    # ② 종목 폴더 찾기 (새로 만들지 않음)
-    subfolder = FOLDER_MAP.get(prop_kind, prop_kind)
-    folder_id = find_child_folder_id(svc, base_parent_id, subfolder)
-    if not folder_id:
-        log(f"  - drive: skip (category folder missing): {GDRIVE_BASE_PATH or '자동탐지 베이스'}/{subfolder}")
-        return
-
-    name = file_path.name
-    mimetype = _guess_mimetype(file_path)
-    media = MediaFileUpload(file_path.as_posix(), mimetype=mimetype)
-
-    # 풀 경로 형태 로그
-    try:
-        root_meta = svc.files().get(fileId=DRIVE_ROOT_ID, fields='id,name').execute()
-        base_meta = svc.files().get(fileId=base_parent_id, fields='id,name,parents').execute()
-        base_name = base_meta.get('name','')
-        root_name = root_meta.get('name','')
-    except Exception:
-        base_name = GDRIVE_BASE_PATH or ''
-        root_name = ''
-
-    # === 여기부터 디버그 정보 확장 ===
-    q = f"name='{name}' and '{folder_id}' in parents and trashed=false"
-    resp = svc.files().list(
-        q=q, spaces='drive', fields='files(id,name)',
-        supportsAllDrives=True, includeItemsFromAllDrives=True
-        q=q,
-        spaces='drive',
-        fields='files(id,name,parents,webViewLink,modifiedTime)',
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True
-    ).execute()
-    files = resp.get('files', [])
-
-    path_parts = [p for p in [root_name, base_name, subfolder, name] if p]
-    full_path_for_log = "/".join(path_parts) if path_parts else f"{subfolder}/{name}"
-    log(f"  - drive target: {full_path_for_log} (https://drive.google.com/drive/folders/{folder_id})")
-
-    if files:
-        fid = files[0]['id']
-        svc.files().update(fileId=fid, media_body=media, supportsAllDrives=True).execute()
-        res = svc.files().update(
-            fileId=fid,
-            media_body=media,
-            supportsAllDrives=True,
-            fields='id,name,parents,webViewLink,modifiedTime'
-        ).execute()
-        log(f"  - drive: overwritten (update) -> {full_path_for_log}")
-        log(f"    · file id      = {res.get('id')}")
-        log(f"    · webViewLink  = {res.get('webViewLink')}")
-        log(f"    · modifiedTime = {res.get('modifiedTime')}")
-    else:
-        meta = {'name': name, 'parents': [folder_id]}
-        svc.files().create(body=meta, media_body=media, fields='id', supportsAllDrives=True).execute()
-        res = svc.files().create(
-            body=meta,
-            media_body=media,
-            fields='id,name,parents,webViewLink,modifiedTime',
-            supportsAllDrives=True
-        ).execute()
-        log(f"  - drive: uploaded (create) -> {full_path_for_log}")
-        log(f"    · file id      = {res.get('id')}")
-        log(f"    · webViewLink  = {res.get('webViewLink')}")
-        log(f"    · modifiedTime = {res.get('modifiedTime')}")
-
-# ==================== 다운로드/전처리/셀레니움 ====================
-import re, time
-from datetime import date, timedelta, datetime
-from typing import Optional, Tuple
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -204,22 +77,291 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
+
+# ==================== 기본 설정 ====================
+
 URL = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
-OUT_DIR = Path(os.getenv("OUT_DIR", "output")).resolve(); OUT_DIR.mkdir(parents=True, exist_ok=True)
-TMP_DIR = (Path.cwd() / "_rt_downloads").resolve(); TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-IS_CI = os.getenv("CI", "") == "1"
+OUT_DIR = Path(os.getenv("OUT_DIR", "output")).resolve()
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+TMP_DIR = (Path.cwd() / "_rt_downloads").resolve()
+TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+DEBUG_DIR = Path(os.getenv("DEBUG_DIR", "debug")).resolve()
+DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+
 DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "30"))
-CLICK_RETRY_MAX  = int(os.getenv("CLICK_RETRY_MAX", "15"))
+CLICK_RETRY_MAX = int(os.getenv("CLICK_RETRY_MAX", "15"))
 CLICK_RETRY_WAIT = float(os.getenv("CLICK_RETRY_WAIT", "1"))
-# ↑ 다운로드 클릭 재시도 대기
-NAV_RETRY_MAX   = int(os.getenv("NAV_RETRY_MAX", "6"))  # ★ 추가: 탭 네비게이션 재시도 횟수(기본 6회)
+NAV_RETRY_MAX = int(os.getenv("NAV_RETRY_MAX", "10"))
+PAGELOAD_TIMEOUT = int(os.getenv("PAGELOAD_TIMEOUT", "60"))
 
-PROPERTY_TYPES = ["아파트","연립다세대","단독다가구","오피스텔","상업업무용","토지","공장창고등"]
-TAB_IDS = {"아파트":"xlsTab1","연립다세대":"xlsTab2","단독다가구":"xlsTab3","오피스텔":"xlsTab4","상업업무용":"xlsTab6","토지":"xlsTab7","공장창고등":"xlsTab8"}
-TAB_TEXT = {"아파트":"아파트","연립다세대":"연립/다세대","단독다가구":"단독/다가구","오피스텔":"오피스텔","상업업무용":"상업/업무용","토지":"토지","공장창고등":"공장/창고 등"}
+# HEADLESS=0 으로 실행하면 실제 크롬창이 뜸
+HEADLESS = os.getenv("HEADLESS", "1").strip() not in ("0", "false", "False", "NO", "no")
 
-# ---------- 날짜 유틸 ----------
+PROPERTY_TYPES = [
+    "아파트",
+    "연립다세대",
+    "단독다가구",
+    "오피스텔",
+    "상업업무용",
+    "토지",
+    "공장창고등",
+]
+
+TAB_IDS = {
+    "아파트": "xlsTab1",
+    "연립다세대": "xlsTab2",
+    "단독다가구": "xlsTab3",
+    "오피스텔": "xlsTab4",
+    "상업업무용": "xlsTab6",
+    "토지": "xlsTab7",
+    "공장창고등": "xlsTab8",
+}
+
+TAB_TEXT = {
+    "아파트": "아파트",
+    "연립다세대": "연립/다세대",
+    "단독다가구": "단독/다가구",
+    "오피스텔": "오피스텔",
+    "상업업무용": "상업/업무용",
+    "토지": "토지",
+    "공장창고등": "공장/창고 등",
+}
+
+FOLDER_MAP = {
+    "아파트": "아파트",
+    "단독다가구": "단독다가구",
+    "연립다세대": "연립다세대",
+    "오피스텔": "오피스텔",
+    "상업업무용": "상업업무용",
+    "토지": "토지",
+    "공장창고등": "공장창고등",
+}
+
+DRIVE_ROOT_ID = os.getenv("GDRIVE_FOLDER_ID", "").strip()
+GDRIVE_BASE_PATH = os.getenv("GDRIVE_BASE_PATH", "").strip()
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+# ==================== 디버그 저장 ====================
+
+def save_debug(driver: webdriver.Chrome, name: str):
+    """
+    실패 순간의 HTML/스크린샷 저장.
+    debug 폴더에 name.html / name.png 생성.
+    """
+    safe = re.sub(r"[^0-9A-Za-z가-힣_.-]+", "_", name).strip("_")
+    html_path = DEBUG_DIR / f"{safe}.html"
+    png_path = DEBUG_DIR / f"{safe}.png"
+
+    try:
+        html_path.write_text(driver.page_source or "", encoding="utf-8")
+        log(f"  - debug html saved: {html_path}")
+    except Exception as e:
+        log(f"  - debug html save failed: {e}")
+
+    try:
+        driver.save_screenshot(str(png_path))
+        log(f"  - debug screenshot saved: {png_path}")
+    except Exception as e:
+        log(f"  - debug screenshot save failed: {e}")
+
+    try:
+        title = driver.title
+        current_url = driver.current_url
+        body_text = driver.execute_script(
+            "return document.body ? document.body.innerText.slice(0, 1000) : '';"
+        )
+        log(f"  - debug title: {title}")
+        log(f"  - debug current_url: {current_url}")
+        log("  - debug body text preview:")
+        log(body_text)
+    except Exception:
+        pass
+
+
+# ==================== Google Drive 업로드 ====================
+
+def load_sa():
+    raw = os.getenv("GCP_SERVICE_ACCOUNT_KEY", "").strip()
+    if not raw:
+        raise RuntimeError("Service account key missing")
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = json.loads(base64.b64decode(raw).decode("utf-8"))
+
+    return Credentials.from_service_account_info(
+        data,
+        scopes=["https://www.googleapis.com/auth/drive"],
+    )
+
+
+def find_child_folder_id(svc, parent_id: str, name: str):
+    safe_name = name.replace("'", "\\'")
+    q = (
+        f"name='{safe_name}' and '{parent_id}' in parents "
+        "and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    )
+    resp = (
+        svc.files()
+        .list(
+            q=q,
+            spaces="drive",
+            fields="files(id,name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        )
+        .execute()
+    )
+    files = resp.get("files", [])
+    return files[0]["id"] if files else None
+
+
+def resolve_path(svc, start_parent_id: str, path: str):
+    current = start_parent_id
+    if not path:
+        return current
+
+    for seg in [p.strip() for p in path.split("/") if p.strip()]:
+        found = find_child_folder_id(svc, current, seg)
+        if not found:
+            return None
+        current = found
+
+    return current
+
+
+def detect_base_parent_id(svc):
+    if GDRIVE_BASE_PATH:
+        bp = resolve_path(svc, DRIVE_ROOT_ID, GDRIVE_BASE_PATH)
+        if bp:
+            return bp
+
+    guess = find_child_folder_id(svc, DRIVE_ROOT_ID, "부동산 실거래자료")
+    return guess or DRIVE_ROOT_ID
+
+
+def _guess_mimetype(file_path: Path) -> str:
+    ext = file_path.suffix.lower()
+    if ext == ".xlsx":
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if ext == ".csv":
+        return "text/csv"
+    return "application/octet-stream"
+
+
+def upload_processed(file_path: Path, prop_kind: str):
+    """
+    전처리된 파일(xlsx/csv)을 Google Drive 기존 폴더에 업로드 또는 덮어쓰기.
+    폴더는 새로 만들지 않음.
+    """
+    if not file_path.exists():
+        log(f"  - drive: skip (file not found): {file_path}")
+        return
+
+    if not DRIVE_ROOT_ID:
+        log("  - drive: skip (missing GDRIVE_FOLDER_ID)")
+        return
+
+    try:
+        creds = load_sa()
+    except Exception as e:
+        log(f"  - drive: skip (SA load error): {e}")
+        return
+
+    svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+
+    base_parent_id = detect_base_parent_id(svc)
+    if not base_parent_id:
+        log(f"  - drive: skip (base path not found): {GDRIVE_BASE_PATH}")
+        return
+
+    subfolder = FOLDER_MAP.get(prop_kind, prop_kind)
+    folder_id = find_child_folder_id(svc, base_parent_id, subfolder)
+    if not folder_id:
+        log(
+            "  - drive: skip (category folder missing): "
+            f"{GDRIVE_BASE_PATH or '자동탐지 베이스'}/{subfolder}"
+        )
+        return
+
+    name = file_path.name
+    mimetype = _guess_mimetype(file_path)
+    media = MediaFileUpload(file_path.as_posix(), mimetype=mimetype, resumable=True)
+
+    try:
+        root_meta = svc.files().get(fileId=DRIVE_ROOT_ID, fields="id,name").execute()
+        base_meta = svc.files().get(fileId=base_parent_id, fields="id,name,parents").execute()
+        root_name = root_meta.get("name", "")
+        base_name = base_meta.get("name", "")
+    except Exception:
+        root_name = ""
+        base_name = GDRIVE_BASE_PATH or ""
+
+    safe_name = name.replace("'", "\\'")
+    q = f"name='{safe_name}' and '{folder_id}' in parents and trashed=false"
+
+    resp = (
+        svc.files()
+        .list(
+            q=q,
+            spaces="drive",
+            fields="files(id,name,parents,webViewLink,modifiedTime)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        )
+        .execute()
+    )
+
+    files = resp.get("files", [])
+    path_parts = [p for p in [root_name, base_name, subfolder, name] if p]
+    full_path_for_log = "/".join(path_parts) if path_parts else f"{subfolder}/{name}"
+
+    log(
+        f"  - drive target: {full_path_for_log} "
+        f"(https://drive.google.com/drive/folders/{folder_id})"
+    )
+
+    if files:
+        fid = files[0]["id"]
+        res = (
+            svc.files()
+            .update(
+                fileId=fid,
+                media_body=media,
+                supportsAllDrives=True,
+                fields="id,name,parents,webViewLink,modifiedTime",
+            )
+            .execute()
+        )
+        log(f"  - drive: overwritten (update) -> {full_path_for_log}")
+    else:
+        meta = {"name": name, "parents": [folder_id]}
+        res = (
+            svc.files()
+            .create(
+                body=meta,
+                media_body=media,
+                fields="id,name,parents,webViewLink,modifiedTime",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        log(f"  - drive: uploaded (create) -> {full_path_for_log}")
+
+    log(f"    · file id      = {res.get('id')}")
+    log(f"    · webViewLink  = {res.get('webViewLink')}")
+    log(f"    · modifiedTime = {res.get('modifiedTime')}")
+
+
+# ==================== 날짜 유틸 ====================
 
 def today_kst() -> date:
     return (datetime.utcnow() + timedelta(hours=9)).date()
@@ -234,26 +376,36 @@ def shift_months(d: date, k: int) -> date:
     m = (d.month - 1 + k) % 12 + 1
     return date(y, m, 1)
 
-# ---------- 크롬 ----------
+
+# ==================== 크롬 드라이버 ====================
 
 def build_driver(download_dir: Path) -> webdriver.Chrome:
     opts = Options()
-    opts.add_argument("--headless=new")
+
+    if HEADLESS:
+        opts.add_argument("--headless=new")
+    else:
+        log("  - HEADLESS=0: 실제 크롬창 표시 모드")
+
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--disable-notifications")
     opts.add_argument("--window-size=1400,900")
     opts.add_argument("--lang=ko-KR")
-    # 자동화 탐지 완화 & 빠른 로드 전략
     opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--disable-popup-blocking")
+    opts.add_argument("--remote-allow-origins=*")
+
+    # complete까지 기다리지 않고 DOMInteractive 수준에서 반환
     opts.page_load_strategy = "eager"
 
     prefs = {
         "download.default_directory": str(download_dir),
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
-        "safebrowsing.enabled": True
+        "safebrowsing.enabled": True,
+        "profile.default_content_setting_values.automatic_downloads": 1,
     }
     opts.add_experimental_option("prefs", prefs)
 
@@ -268,83 +420,196 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
         service = Service(ChromeDriverManager().install())
 
     driver = webdriver.Chrome(service=service, options=opts)
-
-    # 페이지 하드 타임아웃
-    page_timeout = int(os.getenv("PAGELOAD_TIMEOUT", "20"))
-    driver.set_page_load_timeout(page_timeout)
+    driver.set_page_load_timeout(PAGELOAD_TIMEOUT)
 
     try:
-        driver.execute_cdp_cmd("Page.setDownloadBehavior", {"behavior":"allow","downloadPath": str(download_dir),"eventsEnabled": True})
+        driver.execute_cdp_cmd(
+            "Page.setDownloadBehavior",
+            {
+                "behavior": "allow",
+                "downloadPath": str(download_dir),
+                "eventsEnabled": True,
+            },
+        )
     except Exception:
         pass
+
     return driver
 
-# ---------- 페이지 조작 ----------
+
+# ==================== 페이지 조작 ====================
 
 def _try_accept_alert(driver: webdriver.Chrome, wait=1.5) -> bool:
     t0 = time.time()
     while time.time() - t0 < wait:
         try:
-            Alert(driver).accept(); return True
+            Alert(driver).accept()
+            return True
         except Exception:
             time.sleep(0.15)
     return False
 
 
-def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=12, tab_label: Optional[str]=None) -> bool:
+def wait_page_has_body(driver: webdriver.Chrome, wait_sec=30) -> bool:
+    """
+    readyState complete에 과도하게 의존하지 않고 body 텍스트 또는 링크/버튼 출현을 기다림.
+    """
     try:
-        WebDriverWait(driver, wait_sec).until(lambda d: d.execute_script("return document.readyState") == "complete")
-        WebDriverWait(driver, wait_sec).until(EC.presence_of_element_located((By.CSS_SELECTOR, "ul.quarter-tab-cover")))
+        WebDriverWait(driver, wait_sec).until(
+            lambda d: d.execute_script(
+                """
+                if (!document.body) return false;
+                const txt = document.body.innerText || '';
+                const controls = document.querySelectorAll('a,button,input,select').length;
+                return txt.length > 20 || controls > 5;
+                """
+            )
+        )
+        return True
     except Exception as e:
-        log(f"  - tab container wait failed: {e}"); return False
-    # 1) 표준 클릭
+        log(f"  - body/control wait failed: {e}")
+        return False
+
+
+def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=30, tab_label: Optional[str] = None) -> bool:
+    """
+    탭 클릭 보강 버전.
+    기존처럼 ul.quarter-tab-cover가 반드시 있어야 한다고 보지 않음.
+    1) ID 클릭
+    2) href/id/onclick에 tab_id가 들어간 요소 클릭
+    3) 텍스트 라벨 클릭
+    4) 유사 텍스트 클릭
+    실패 시 debug 저장
+    """
+    driver.switch_to.default_content()
+    _try_accept_alert(driver, 1.0)
+
+    if not wait_page_has_body(driver, wait_sec=wait_sec):
+        save_debug(driver, f"tab_body_wait_failed_{tab_id}")
+        return False
+
+    # 기존 컨테이너가 있으면 로그만 남김. 없어도 실패 처리하지 않음.
     try:
-        el = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.ID, tab_id)))
+        has_old_container = driver.execute_script(
+            "return !!document.querySelector('ul.quarter-tab-cover');"
+        )
+        log(f"  - tab container quarter-tab-cover exists: {has_old_container}")
+    except Exception:
+        pass
+
+    # 1) ID로 직접 클릭
+    try:
+        el = WebDriverWait(driver, 8).until(
+            EC.presence_of_element_located((By.ID, tab_id))
+        )
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-        driver.execute_script("arguments[0].click();", el); time.sleep(0.2)
-        active = driver.execute_script("var e=document.getElementById(arguments[0]);return e&&e.parentElement&&e.parentElement.classList.contains('on');", tab_id)
-        if active: return True
-    except Exception:
-        pass
-    # 2) JS 직접 클릭
+        time.sleep(0.1)
+        driver.execute_script("arguments[0].click();", el)
+        time.sleep(0.5)
+        log(f"  - tab clicked by id: {tab_id}")
+        return True
+    except Exception as e:
+        log(f"  - tab id click failed: {tab_id} / {e}")
+
+    # 2) href/id/onclick 속성에 tab_id가 들어간 요소
     try:
-        clicked = driver.execute_script("var el=document.getElementById(arguments[0]); if(el&&el.offsetParent!==null){el.scrollIntoView({block:'center'}); el.click(); return true;} return false;", tab_id)
-        if clicked:
-            time.sleep(0.2)
-            active = driver.execute_script("var e=document.getElementById(arguments[0]);return e&&e.parentElement&&e.parentElement.classList.contains('on');", tab_id)
-            if active: return True
-    except Exception:
-        pass
-    # 3) 라벨로 매칭
-    try:
-        lbl = tab_label or next((TAB_TEXT[k] for k,v in TAB_IDS.items() if v==tab_id), None)
-        if lbl:
-            js = "var lbl=arguments[0]; var as=document.querySelectorAll('ul.quarter-tab-cover a'); for(var i=0;i<as.length;i++){var t=as[i].textContent.trim(); if(t===lbl){as[i].scrollIntoView({block:'center'}); as[i].click(); return true;}} return false;"
+        js = """
+        const tabId = arguments[0];
+        const els = [...document.querySelectorAll('a,button,input,li,span')];
+        const target = els.find(e => {
+            const id = e.id || '';
+            const href = e.getAttribute('href') || '';
+            const onclick = e.getAttribute('onclick') || '';
+            return id === tabId || href.includes(tabId) || onclick.includes(tabId);
+        });
+        if (target) {
+            target.scrollIntoView({block:'center'});
+            target.click();
+            return true;
+        }
+        return false;
+        """
+        if driver.execute_script(js, tab_id):
+            time.sleep(0.5)
+            log(f"  - tab clicked by attribute: {tab_id}")
+            return True
+    except Exception as e:
+        log(f"  - tab attribute click failed: {e}")
+
+    # 3) 정확한 텍스트 라벨
+    lbl = tab_label or ""
+    if lbl:
+        try:
+            js = """
+            const lbl = arguments[0].trim();
+            const els = [...document.querySelectorAll('a,button,input,li,span,div')];
+            const target = els.find(e => {
+                const txt = (e.innerText || e.value || e.textContent || '').trim();
+                return txt === lbl;
+            });
+            if (target) {
+                target.scrollIntoView({block:'center'});
+                target.click();
+                return true;
+            }
+            return false;
+            """
             if driver.execute_script(js, lbl):
-                time.sleep(0.2); return True
-    except Exception:
-        pass
-    log("  - tab click failed: all strategies"); return False
+                time.sleep(0.5)
+                log(f"  - tab clicked by exact text: {lbl}")
+                return True
+        except Exception as e:
+            log(f"  - tab exact text click failed: {e}")
 
-# ---------- 날짜 입력 찾기/설정 ----------
-import re
-from typing import Tuple, Optional
-from selenium.webdriver.common.keys import Keys
+    # 4) 유사 텍스트
+    if lbl:
+        try:
+            key = lbl.replace("/", "").replace(" ", "")
+            js = """
+            const key = arguments[0];
+            const els = [...document.querySelectorAll('a,button,input,li,span,div')];
+            const target = els.find(e => {
+                const raw = (e.innerText || e.value || e.textContent || '');
+                const txt = raw.replaceAll('/', '').replaceAll(' ', '').trim();
+                return txt.includes(key);
+            });
+            if (target) {
+                target.scrollIntoView({block:'center'});
+                target.click();
+                return true;
+            }
+            return false;
+            """
+            if driver.execute_script(js, key):
+                time.sleep(0.5)
+                log(f"  - tab clicked by fuzzy text: {lbl}")
+                return True
+        except Exception as e:
+            log(f"  - tab fuzzy text click failed: {e}")
 
+    save_debug(driver, f"tab_click_failed_{tab_id}_{tab_label or ''}")
+    log("  - tab click failed: all strategies")
+    return False
+
+
+# ==================== 날짜 입력 찾기/설정 ====================
 
 def _looks_like_date_input(el) -> bool:
     typ = (el.get_attribute("type") or "").lower()
-    ph  = (el.get_attribute("placeholder") or "").lower()
+    ph = (el.get_attribute("placeholder") or "").lower()
     val = (el.get_attribute("value") or "").lower()
-    name= (el.get_attribute("name") or "").lower()
+    name = (el.get_attribute("name") or "").lower()
     id_ = (el.get_attribute("id") or "").lower()
     txt = " ".join([ph, val, name, id_])
+
     return (
-        typ in ("date", "text", "") and (
-            re.search(r"\d{4}-\d{2}-\d{2}", ph) or
-            re.search(r"\d{4}-\d{2}-\d{2}", val) or
-            "yyyy" in ph or "yyyy-mm-dd" in ph or
-            any(k in txt for k in ["start","end","from","to","srchbgnde","srchendde"])
+        typ in ("date", "text", "")
+        and (
+            re.search(r"\d{4}-\d{2}-\d{2}", ph)
+            or re.search(r"\d{4}-\d{2}-\d{2}", val)
+            or "yyyy" in ph
+            or "yyyy-mm-dd" in ph
+            or any(k in txt for k in ["start", "end", "from", "to", "srchbgnde", "srchendde"])
         )
     )
 
@@ -353,27 +618,34 @@ def _find_inputs_current_context(driver) -> Optional[Tuple]:
     pairs = [
         ("#srchBgnDe", "#srchEndDe"),
         ("input[name='srchBgnDe']", "input[name='srchEndDe']"),
+        ("#startDate", "#endDate"),
+        ("input[name='startDate']", "input[name='endDate']"),
     ]
+
     for sel_s, sel_e in pairs:
         try:
             s = driver.find_element(By.CSS_SELECTOR, sel_s)
             e = driver.find_element(By.CSS_SELECTOR, sel_e)
-            return (s, e)
+            return s, e
         except Exception:
             pass
+
     inputs = driver.find_elements(By.CSS_SELECTOR, "input")
     cands = [el for el in inputs if _looks_like_date_input(el)]
     if len(cands) >= 2:
         return cands[0], cands[1]
+
     dates = [e for e in inputs if (e.get_attribute("type") or "").lower() == "date"]
     if len(dates) >= 2:
         return dates[0], dates[1]
+
     return None
 
 
 def find_date_inputs(driver) -> Tuple:
     driver.switch_to.default_content()
     _try_accept_alert(driver, 1.0)
+
     pair = _find_inputs_current_context(driver)
     if pair:
         return pair
@@ -390,13 +662,14 @@ def find_date_inputs(driver) -> Tuple:
             continue
 
     driver.switch_to.default_content()
+    save_debug(driver, "date_inputs_not_found")
     raise RuntimeError("날짜 입력 박스를 찾지 못했습니다.")
 
 
 def _type_and_verify(el, val: str) -> bool:
     try:
         el.click()
-        el.send_keys(Keys.CONTROL, 'a')
+        el.send_keys(Keys.CONTROL, "a")
         el.send_keys(Keys.DELETE)
         el.send_keys(val)
         time.sleep(0.1)
@@ -409,13 +682,17 @@ def _type_and_verify(el, val: str) -> bool:
 
 def _ensure_value_with_js(driver, el, val: str) -> bool:
     try:
-        driver.execute_script("""
+        driver.execute_script(
+            """
             const el = arguments[0], v = arguments[1];
-        el.value = v;
-        el.dispatchEvent(new Event('input', {bubbles:true}));
-        el.dispatchEvent(new Event('change', {bubbles:true}));
-        el.blur();
-        """, el, val)
+            el.value = v;
+            el.dispatchEvent(new Event('input', {bubbles:true}));
+            el.dispatchEvent(new Event('change', {bubbles:true}));
+            el.blur();
+            """,
+            el,
+            val,
+        )
         time.sleep(0.1)
         return (el.get_attribute("value") or "").strip() == val
     except Exception:
@@ -424,83 +701,143 @@ def _ensure_value_with_js(driver, el, val: str) -> bool:
 
 def set_dates(driver, start: date, end: date):
     _try_accept_alert(driver, 1.0)
+
     s_el, e_el = find_date_inputs(driver)
     s_val = start.isoformat()
     e_val = end.isoformat()
+
     ok_s = _type_and_verify(s_el, s_val) or _ensure_value_with_js(driver, s_el, s_val)
     ok_e = _type_and_verify(e_el, e_val) or _ensure_value_with_js(driver, e_el, e_val)
+
     if not ok_s or not ok_e:
         sv = (s_el.get_attribute("value") or "").strip()
         ev = (e_el.get_attribute("value") or "").strip()
         log(f"  - warn: date fill verify failed. want=({s_val},{e_val}) got=({sv},{ev})")
+
     assert (s_el.get_attribute("value") or "").strip() == s_val
     assert (e_el.get_attribute("value") or "").strip() == e_val
 
-# ---------- 다운로드 클릭/대기 ----------
+
+# ==================== 다운로드 클릭/대기 ====================
 
 def _click_by_locators(driver, label: str) -> bool:
     locators = [
         (By.XPATH, f"//button[normalize-space()='{label}']"),
         (By.XPATH, f"//a[normalize-space()='{label}']"),
         (By.XPATH, f"//input[@type='button' and @value='{label}']"),
-        (By.XPATH, "//*[contains(@onclick,'excel') and (self::a or self::button or self::input)]"),
-        (By.XPATH, "//*[@id='excelDown' or @id='btnExcel' or contains(@id,'excel')]")
+        (By.XPATH, f"//*[contains(normalize-space(),'{label}') and (self::a or self::button or self::input or self::span)]"),
+        (By.XPATH, "//*[contains(@onclick,'excel') and (self::a or self::button or self::input or self::span)]"),
+        (By.XPATH, "//*[@id='excelDown' or @id='btnExcel' or contains(@id,'excel') or contains(@class,'excel')]"),
     ]
+
     for by, q in locators:
         try:
             els = driver.find_elements(by, q)
             for el in els:
+                if not el.is_displayed():
+                    continue
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
                 time.sleep(0.05)
-                el.click()
+                try:
+                    el.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", el)
                 _try_accept_alert(driver, 2.0)
                 return True
         except Exception:
             continue
+
     return False
 
 
 def click_download(driver, kind="excel") -> bool:
     label = "EXCEL 다운" if kind == "excel" else "CSV 다운"
     _try_accept_alert(driver, 1.0)
+
     if _click_by_locators(driver, label):
         _try_accept_alert(driver, 3.0)
         return True
-    for fn in ["excelDown","xlsDown","excelDownload","fnExcel","fnExcelDown","fncExcel"]:
+
+    # 함수명 직접 호출 fallback
+    fn_names = [
+        "excelDown",
+        "xlsDown",
+        "excelDownload",
+        "fnExcel",
+        "fnExcelDown",
+        "fncExcel",
+        "csvDown",
+        "fnCsv",
+        "fnCsvDown",
+    ]
+
+    for fn in fn_names:
         try:
-            driver.execute_script(f"if (typeof {fn}==='function') {fn}();")
-            _try_accept_alert(driver, 3.0)
-            return True
+            ok = driver.execute_script(
+                """
+                const fn = arguments[0];
+                if (typeof window[fn] === 'function') {
+                    window[fn]();
+                    return true;
+                }
+                return false;
+                """,
+                fn,
+            )
+            if ok:
+                _try_accept_alert(driver, 3.0)
+                return True
         except Exception:
             continue
+
+    save_debug(driver, f"download_click_failed_{kind}")
     return False
 
 
 def wait_download(dldir: Path, before: set, timeout: int) -> Path:
     endt = time.time() + timeout
+
     while time.time() < endt:
         allf = set(p for p in dldir.glob("*") if p.is_file())
-        newf = [p for p in allf - before if not p.name.endswith(".crdownload")]
+        newf = [
+            p
+            for p in allf - before
+            if not p.name.endswith(".crdownload")
+            and not p.name.endswith(".tmp")
+            and p.stat().st_size > 0
+        ]
+
         if newf:
-            return max(newf, key=lambda p: p.stat().st_mtime)
+            # 다운로드 완료 직후 파일 크기가 아직 변할 수 있어 0.5초 안정화
+            latest = max(newf, key=lambda p: p.stat().st_mtime)
+            size1 = latest.stat().st_size
+            time.sleep(0.5)
+            size2 = latest.stat().st_size
+            if size1 == size2:
+                return latest
+
         time.sleep(0.5)
+
     raise TimeoutError("download not detected within timeout")
 
-# ---------- 전처리 ----------
-from openpyxl.utils import get_column_letter
 
+# ==================== 전처리 ====================
 
 def _read_excel_first_table(path: Path) -> pd.DataFrame:
     raw = pd.read_excel(path, engine="openpyxl", header=None, dtype=str).fillna("")
     df = raw.iloc[12:].copy().reset_index(drop=True)
+
     if df.empty:
         return pd.DataFrame()
+
     if df.shape[1] >= 1:
         df = df.iloc[:, 1:].copy()  # A열 제거
+
     header = df.iloc[0].astype(str).str.strip().tolist()
     df = df.iloc[1:].copy()
     df.columns = [str(c).strip() for c in header]
     df = df.loc[:, [c for c in df.columns if str(c).strip() != ""]]
+
     return df.reset_index(drop=True)
 
 
@@ -512,90 +849,122 @@ def _drop_no_col(df: pd.DataFrame) -> pd.DataFrame:
             break
     return df
 
-# '시군구' 보존 + 파생 컬럼 추가
 
 def _split_sigungu(df: pd.DataFrame) -> pd.DataFrame:
     if "시군구" not in df.columns:
         return df
+
     parts = df["시군구"].astype(str).str.split(expand=True, n=3)
+
     for i, name in enumerate(["광역", "구", "법정동", "리"]):
         if name not in df.columns:
             df[name] = parts[i] if parts.shape[1] > i else ""
+
     return df
 
 
 def _split_yymm(df: pd.DataFrame) -> pd.DataFrame:
     if "계약년월" not in df.columns:
         return df
+
     s = df["계약년월"].astype(str).str.replace(r"\D", "", regex=True)
     df["계약년"] = s.str.slice(0, 4)
     df["계약월"] = s.str.slice(4, 6)
-    return df.drop(columns=["계약년월"])  # 원본 제거
+
+    return df.drop(columns=["계약년월"])
 
 
 def _normalize_numbers(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["거래금액(만원)", "전용면적(㎡)", "면적(㎡)"]:
         if col in df.columns:
             df[col] = (
-                df[col].astype(str)
-                     .str.replace(r"[^0-9.\-]", "", regex=True)
-                     .replace({"": np.nan})
+                df[col]
+                .astype(str)
+                .str.replace(r"[^0-9.\-]", "", regex=True)
+                .replace({"": np.nan})
             )
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
     return df
 
 
 def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
     target_order = [
-        "광역","구","법정동","리","계약년","계약월","계약일",
-        "시군구","번지","본번","부번","단지명","전용면적(㎡)",
-        "거래금액(만원)","동","층","매수자","매도자","건축년도",
-        "도로명","해제사유발생일","거래유형","중개사소재지","등기일자","주택유형"
+        "광역",
+        "구",
+        "법정동",
+        "리",
+        "계약년",
+        "계약월",
+        "계약일",
+        "시군구",
+        "번지",
+        "본번",
+        "부번",
+        "단지명",
+        "전용면적(㎡)",
+        "거래금액(만원)",
+        "동",
+        "층",
+        "매수자",
+        "매도자",
+        "건축년도",
+        "도로명",
+        "해제사유발생일",
+        "거래유형",
+        "중개사소재지",
+        "등기일자",
+        "주택유형",
     ]
+
     cols = list(df.columns)
     ordered = [c for c in target_order if c in cols]
     others = [c for c in cols if c not in ordered]
+
     return df.reindex(columns=ordered + others)
 
 
 def _assert_preprocessed(df: pd.DataFrame):
     cols = set(df.columns)
+
     banned = [c for c in ["계약년월"] if c in cols]
     if banned:
         raise RuntimeError(f"전처리 실패: 금지 컬럼 잔존 {banned}")
-    for must in ["광역","구","법정동","계약년","계약월"]:
+
+    for must in ["광역", "구", "법정동", "계약년", "계약월"]:
         if must not in cols:
             raise RuntimeError(f"전처리 실패: 필수 컬럼 누락 {must}")
 
 
 def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
-    return _reorder_columns(
-        _normalize_numbers(
-            _split_yymm(
-                _split_sigungu(
-                    _drop_no_col(df)
-                )
-            )
-        )
-    )
+    df = _drop_no_col(df)
+    df = _split_sigungu(df)
+    df = _split_yymm(df)
+    df = _normalize_numbers(df)
+    df = _reorder_columns(df)
+    return df
 
 
 def save_excel(path: Path, df: pd.DataFrame):
+    from openpyxl.utils import get_column_letter
+
     path.parent.mkdir(parents=True, exist_ok=True)
+
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="data")
         ws = writer.sheets["data"]
+
         for idx, col in enumerate(df.columns, start=1):
             series = df[col]
             try:
                 max_len = max(
-                    [len(str(col))] +
-                    [len(str(x)) if x is not None else 0 for x in series.tolist()]
+                    [len(str(col))]
+                    + [len(str(x)) if x is not None else 0 for x in series.tolist()]
                 )
             except Exception:
                 max_len = len(str(col))
+
             width = min(80, max(8, max_len + 2))
-            from openpyxl.utils import get_column_letter
             ws.column_dimensions[get_column_letter(idx)].width = width
 
 
@@ -603,28 +972,71 @@ def save_csv(path: Path, df: pd.DataFrame):
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False, encoding="utf-8-sig")
 
-# ---------- 파이프라인 ----------
 
-def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end: date, outname: str):
-    # 진입/세팅(최대 3회 재시도)
-    for nav_try in range(1, NAV_RETRY_MAX + 1):
-        driver.switch_to.default_content()
-        log(f"  - nav{nav_try}: opening page {URL}")
+# ==================== 파이프라인 ====================
+
+def open_rt_page(driver: webdriver.Chrome, nav_try: int):
+    driver.switch_to.default_content()
+    log(f"  - nav{nav_try}: opening page {URL}")
+
+    try:
+        driver.get(URL)
+    except TimeoutException:
+        log(f"  - nav{nav_try}: driver.get timeout -> window.stop()")
         try:
-            driver.get(URL)
-        except TimeoutException:
-            log(f"  - nav{nav_try}: driver.get timeout -> window.stop() 시도")
-            try:
-                driver.execute_script("window.stop();")
-            except Exception:
-                pass
+            driver.execute_script("window.stop();")
+        except Exception:
+            pass
 
-        time.sleep(0.6)
+    time.sleep(1.0)
+    wait_page_has_body(driver, wait_sec=20)
+
+
+def recover_page_and_set_dates(
+    driver: webdriver.Chrome,
+    prop_kind: str,
+    start: date,
+    end: date,
+):
+    """
+    다운로드 재시도 중 페이지를 새로 열고 탭/날짜를 다시 세팅.
+    """
+    open_rt_page(driver, 0)
+    if not click_tab(
+        driver,
+        TAB_IDS.get(prop_kind, "xlsTab1"),
+        tab_label=TAB_TEXT.get(prop_kind),
+        wait_sec=30,
+    ):
+        raise RuntimeError("탭 재진입 실패")
+
+    set_dates(driver, start, end)
+
+
+def fetch_and_process(
+    driver: webdriver.Chrome,
+    prop_kind: str,
+    start: date,
+    end: date,
+    outname: str,
+):
+    # 진입/탭/날짜 세팅
+    for nav_try in range(1, NAV_RETRY_MAX + 1):
+        open_rt_page(driver, nav_try)
+
         log(f"  - nav{nav_try}: clicking tab {prop_kind}")
-        if not click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind)):
+        ok_tab = click_tab(
+            driver,
+            TAB_IDS.get(prop_kind, "xlsTab1"),
+            tab_label=TAB_TEXT.get(prop_kind),
+            wait_sec=30,
+        )
+
+        if not ok_tab:
             log(f"  - nav{nav_try}: tab click failed, retrying...")
             if nav_try == NAV_RETRY_MAX:
                 raise RuntimeError("탭 진입 실패")
+            time.sleep(1.0)
             continue
 
         log(f"  - nav{nav_try}: setting dates {start} ~ {end}")
@@ -634,67 +1046,60 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
             break
         except Exception as e:
             log(f"  - warn: navigate/tab/set_dates retry ({nav_try}/{NAV_RETRY_MAX}): {e}")
+            save_debug(driver, f"set_dates_failed_{prop_kind}_{nav_try}")
+
             if nav_try == NAV_RETRY_MAX:
                 raise
-            time.sleep(0.6)
 
+            time.sleep(1.0)
+
+    # 다운로드
     before = set(p for p in TMP_DIR.glob("*") if p.is_file())
     got = None
+
     for attempt in range(1, CLICK_RETRY_MAX + 1):
         ok = click_download(driver, "excel")
         log(f"  - [{prop_kind}] click_download(excel) / attempt {attempt}: {ok}")
+
         if not ok:
             time.sleep(CLICK_RETRY_WAIT)
             if attempt % 5 == 0:
-                driver.switch_to.default_content()
                 log("  - refresh page for retry")
-                try:
-                    driver.get(URL)
-                except TimeoutException:
-                    log("  - refresh timeout; window.stop()")
-                    try:
-                        driver.execute_script("window.stop();")
-                    except Exception:
-                        pass
-                time.sleep(0.6)
-                click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind))
-                set_dates(driver, start, end)
+                recover_page_and_set_dates(driver, prop_kind, start, end)
             continue
+
         try:
             got = wait_download(TMP_DIR, before, timeout=DOWNLOAD_TIMEOUT)
             break
         except TimeoutError:
             log(f"  - warn: 다운로드 시작 감지 실패(시도 {attempt}/{CLICK_RETRY_MAX})")
+            save_debug(driver, f"download_wait_failed_{prop_kind}_{attempt}")
+
             if attempt % 5 == 0:
-                driver.switch_to.default_content()
                 log("  - refresh page for retry")
-                try:
-                    driver.get(URL)
-                except TimeoutException:
-                    log("  - refresh timeout; window.stop()")
-                    try:
-                        driver.execute_script("window.stop();")
-                    except Exception:
-                        pass
-                time.sleep(0.6)
-                click_tab(driver, TAB_IDS.get(prop_kind, "xlsTab1"), tab_label=TAB_TEXT.get(prop_kind))
-                set_dates(driver, start, end)
+                recover_page_and_set_dates(driver, prop_kind, start, end)
+
             continue
 
     if not got:
         raise RuntimeError("다운로드 실패")
+
     log(f"  - got file: {got}  size={got.stat().st_size:,}  ext={got.suffix}")
 
-    # 전처리 → 저장 → 업로드
+    # 전처리
     df = _read_excel_first_table(got)
     df = preprocess_df(df)
+
     log("  - 헤더(전처리 후): " + " | ".join([str(c) for c in df.columns.tolist()]))
     log(f"  - 행/열 크기: {df.shape[0]} rows × {df.shape[1]} cols")
+
     _assert_preprocessed(df)
 
-    # 동일 이름의 xlsx와 csv 동시 생성
+    # 동일 이름의 xlsx/csv 저장
     out_xlsx = OUT_DIR / outname
-    out_csv  = OUT_DIR / (outname[:-5] + ".csv" if outname.lower().endswith(".xlsx") else (outname + ".csv"))
+    out_csv = OUT_DIR / (
+        outname[:-5] + ".csv" if outname.lower().endswith(".xlsx") else outname + ".csv"
+    )
 
     save_excel(out_xlsx, df)
     save_csv(out_csv, df)
@@ -702,30 +1107,41 @@ def fetch_and_process(driver: webdriver.Chrome, prop_kind: str, start: date, end
     log(f"완료: [{prop_kind}] {out_xlsx}")
     log(f"완료: [{prop_kind}] {out_csv}")
 
-    # 각각 덮어쓰기 업로드
+    # Google Drive 업로드
     upload_processed(out_xlsx, prop_kind)
-    upload_processed(out_csv,  prop_kind)
+    upload_processed(out_csv, prop_kind)
 
-# ---------- 메인 ----------
+
+# ==================== 메인 ====================
 
 def main():
     t = today_kst()
-    bases = [shift_months(month_first(t), -i) for i in range(4, -1, -1)]  # 최근 3개월(당월 포함)
-    bases = [shift_months(month_first(t), -i) for i in range(4, -1, -1)]  # 최근 5개월(당월 포함)
+
+    # 최근 5개월: 4개월 전 ~ 당월
+    bases = [shift_months(month_first(t), -i) for i in range(4, -1, -1)]
+
     driver = build_driver(TMP_DIR)
+
     try:
         for prop_kind in PROPERTY_TYPES:
             for base in bases:
                 start = base
-                end = t if (base.year, base.month) == (t.year, t.month) else (shift_months(base, 1) - timedelta(days=1))
+                if (base.year, base.month) == (t.year, t.month):
+                    end = t
+                else:
+                    end = shift_months(base, 1) - timedelta(days=1)
+
                 name = f"{prop_kind} {base:%Y%m}.xlsx"
                 log(f"[전국/{prop_kind}] {start} ~ {end} → {name}")
+
                 fetch_and_process(driver, prop_kind, start, end, name)
+
     finally:
         try:
             driver.quit()
         except Exception:
             pass
+
 
 if __name__ == "__main__":
     main()
