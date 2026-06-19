@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-국토부 실거래 다운로더 — 디버그/탭진입 보강 수정본
+국토부 실거래 다운로더 — 안정화 전체본
 
 주요 보강:
 1) 국토부 페이지가 느리거나 headless에서 DOM 생성이 늦을 때를 대비해 대기 로직 완화
 2) 탭 컨테이너 ul.quarter-tab-cover 고정 의존 제거
-3) 실패 시 debug_rt_page.html / debug_rt_page.png 저장
+3) 실패 시 debug/*.html / debug/*.png 저장
 4) 필요 시 HEADLESS=0 으로 실제 크롬창을 띄워 확인 가능
 5) Google Drive 업로드 함수의 중복 list/update/create 호출 정리
+6) ERR_EMPTY_RESPONSE / 빈 응답 / 크롬 오류 페이지 감지 후 backoff 재시도
+7) 종목·월별 요청 사이 지연을 넣어 공공사이트 반복 접속 안정성 개선
 """
 
 # --- runtime dep bootstrap ---
@@ -60,6 +62,7 @@ import os
 import base64
 import re
 import time
+import random
 from datetime import date, timedelta, datetime
 from typing import Optional, Tuple
 
@@ -96,6 +99,12 @@ CLICK_RETRY_MAX = int(os.getenv("CLICK_RETRY_MAX", "15"))
 CLICK_RETRY_WAIT = float(os.getenv("CLICK_RETRY_WAIT", "1"))
 NAV_RETRY_MAX = int(os.getenv("NAV_RETRY_MAX", "10"))
 PAGELOAD_TIMEOUT = int(os.getenv("PAGELOAD_TIMEOUT", "60"))
+
+# 국토부 서버가 반복 접속 중 ERR_EMPTY_RESPONSE를 내는 경우가 있어 요청 사이에 간격을 둠
+NAV_BACKOFF_BASE = float(os.getenv("NAV_BACKOFF_BASE", "8"))      # 페이지 진입 실패 시 기본 대기초
+MONTH_SLEEP = float(os.getenv("MONTH_SLEEP", "2"))                # 월별 다운로드 후 대기초
+CATEGORY_SLEEP = float(os.getenv("CATEGORY_SLEEP", "5"))          # 종목 변경 시 대기초
+JITTER_SLEEP = float(os.getenv("JITTER_SLEEP", "1.5"))            # 랜덤 지터 최대초
 
 # HEADLESS=0 으로 실행하면 실제 크롬창이 뜸
 HEADLESS = os.getenv("HEADLESS", "1").strip() not in ("0", "false", "False", "NO", "no")
@@ -471,6 +480,59 @@ def wait_page_has_body(driver: webdriver.Chrome, wait_sec=30) -> bool:
         return False
 
 
+def get_body_text(driver: webdriver.Chrome, limit: int = 2000) -> str:
+    try:
+        return driver.execute_script(
+            "return document.body ? (document.body.innerText || '').slice(0, arguments[0]) : '';",
+            limit,
+        ) or ""
+    except Exception:
+        return ""
+
+
+def page_has_empty_response(driver: webdriver.Chrome) -> bool:
+    """
+    Chrome 오류 페이지/국토부 빈 응답을 감지.
+    이 상태에서는 탭 DOM이 없으므로 클릭을 시도하지 말고 재접속해야 함.
+    """
+    txt = get_body_text(driver, 3000)
+    markers = [
+        "ERR_EMPTY_RESPONSE",
+        "didn’t send any data",
+        "didn't send any data",
+        "This page isn’t working",
+        "This page isn't working",
+        "사이트에 연결할 수 없음",
+        "페이지가 작동하지 않습니다",
+    ]
+    return any(m in txt for m in markers)
+
+
+def page_looks_unusable(driver: webdriver.Chrome) -> bool:
+    """
+    빈 응답뿐 아니라 body가 지나치게 짧고 컨트롤이 거의 없는 오류 상태도 감지.
+    """
+    if page_has_empty_response(driver):
+        return True
+    try:
+        txt_len, controls = driver.execute_script(
+            """
+            const txt = document.body ? (document.body.innerText || '') : '';
+            const controls = document.querySelectorAll('a,button,input,select').length;
+            return [txt.length, controls];
+            """
+        )
+        return txt_len < 20 and controls < 3
+    except Exception:
+        return True
+
+
+def backoff_sleep(reason: str, attempt: int):
+    sec = NAV_BACKOFF_BASE + (attempt * 4) + random.uniform(0, JITTER_SLEEP)
+    log(f"  - backoff: {reason} -> sleep {sec:.1f}s")
+    time.sleep(sec)
+
+
 def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=30, tab_label: Optional[str] = None) -> bool:
     """
     탭 클릭 보강 버전.
@@ -486,6 +548,11 @@ def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=30, tab_label: Opt
 
     if not wait_page_has_body(driver, wait_sec=wait_sec):
         save_debug(driver, f"tab_body_wait_failed_{tab_id}")
+        return False
+
+    if page_has_empty_response(driver):
+        save_debug(driver, f"tab_empty_response_{tab_id}_{tab_label or ''}")
+        log("  - tab click skipped: ERR_EMPTY_RESPONSE page")
         return False
 
     # 기존 컨테이너가 있으면 로그만 남김. 없어도 실패 처리하지 않음.
@@ -975,7 +1042,11 @@ def save_csv(path: Path, df: pd.DataFrame):
 
 # ==================== 파이프라인 ====================
 
-def open_rt_page(driver: webdriver.Chrome, nav_try: int):
+def open_rt_page(driver: webdriver.Chrome, nav_try: int) -> bool:
+    """
+    국토부 페이지 진입.
+    ERR_EMPTY_RESPONSE나 크롬 오류 페이지가 뜨면 False를 반환해 상위 루프가 backoff 후 재시도하게 함.
+    """
     driver.switch_to.default_content()
     log(f"  - nav{nav_try}: opening page {URL}")
 
@@ -987,9 +1058,24 @@ def open_rt_page(driver: webdriver.Chrome, nav_try: int):
             driver.execute_script("window.stop();")
         except Exception:
             pass
+    except Exception as e:
+        log(f"  - nav{nav_try}: driver.get error: {e}")
+        return False
 
-    time.sleep(1.0)
-    wait_page_has_body(driver, wait_sec=20)
+    time.sleep(1.5 + random.uniform(0, JITTER_SLEEP))
+    wait_page_has_body(driver, wait_sec=25)
+
+    if page_has_empty_response(driver):
+        log(f"  - nav{nav_try}: ERR_EMPTY_RESPONSE / empty response detected")
+        save_debug(driver, f"empty_response_nav{nav_try}")
+        return False
+
+    if page_looks_unusable(driver):
+        log(f"  - nav{nav_try}: page looks unusable")
+        save_debug(driver, f"unusable_page_nav{nav_try}")
+        return False
+
+    return True
 
 
 def recover_page_and_set_dates(
@@ -1001,7 +1087,8 @@ def recover_page_and_set_dates(
     """
     다운로드 재시도 중 페이지를 새로 열고 탭/날짜를 다시 세팅.
     """
-    open_rt_page(driver, 0)
+    if not open_rt_page(driver, 0):
+        raise RuntimeError("페이지 재진입 실패")
     if not click_tab(
         driver,
         TAB_IDS.get(prop_kind, "xlsTab1"),
@@ -1022,7 +1109,11 @@ def fetch_and_process(
 ):
     # 진입/탭/날짜 세팅
     for nav_try in range(1, NAV_RETRY_MAX + 1):
-        open_rt_page(driver, nav_try)
+        if not open_rt_page(driver, nav_try):
+            if nav_try == NAV_RETRY_MAX:
+                raise RuntimeError("국토부 페이지 진입 실패")
+            backoff_sleep("page open failed", nav_try)
+            continue
 
         log(f"  - nav{nav_try}: clicking tab {prop_kind}")
         ok_tab = click_tab(
@@ -1036,7 +1127,7 @@ def fetch_and_process(
             log(f"  - nav{nav_try}: tab click failed, retrying...")
             if nav_try == NAV_RETRY_MAX:
                 raise RuntimeError("탭 진입 실패")
-            time.sleep(1.0)
+            backoff_sleep("tab click failed", nav_try)
             continue
 
         log(f"  - nav{nav_try}: setting dates {start} ~ {end}")
@@ -1051,7 +1142,7 @@ def fetch_and_process(
             if nav_try == NAV_RETRY_MAX:
                 raise
 
-            time.sleep(1.0)
+            backoff_sleep("set_dates failed", nav_try)
 
     # 다운로드
     before = set(p for p in TMP_DIR.glob("*") if p.is_file())
@@ -1124,6 +1215,8 @@ def main():
 
     try:
         for prop_kind in PROPERTY_TYPES:
+            log(f"=== category start: {prop_kind} ===")
+            time.sleep(CATEGORY_SLEEP + random.uniform(0, JITTER_SLEEP))
             for base in bases:
                 start = base
                 if (base.year, base.month) == (t.year, t.month):
@@ -1135,6 +1228,7 @@ def main():
                 log(f"[전국/{prop_kind}] {start} ~ {end} → {name}")
 
                 fetch_and_process(driver, prop_kind, start, end, name)
+                time.sleep(MONTH_SLEEP + random.uniform(0, JITTER_SLEEP))
 
     finally:
         try:
