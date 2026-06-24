@@ -98,7 +98,7 @@ DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "30"))
 CLICK_RETRY_MAX = int(os.getenv("CLICK_RETRY_MAX", "15"))
 CLICK_RETRY_WAIT = float(os.getenv("CLICK_RETRY_WAIT", "1"))
 NAV_RETRY_MAX = int(os.getenv("NAV_RETRY_MAX", "10"))
-PAGELOAD_TIMEOUT = int(os.getenv("PAGELOAD_TIMEOUT", "60"))
+PAGELOAD_TIMEOUT = int(os.getenv("PAGELOAD_TIMEOUT", "120"))
 
 # 국토부 서버가 반복 접속 중 ERR_EMPTY_RESPONSE를 내는 경우가 있어 요청 사이에 간격을 둠
 NAV_BACKOFF_BASE = float(os.getenv("NAV_BACKOFF_BASE", "8"))      # 페이지 진입 실패 시 기본 대기초
@@ -108,6 +108,12 @@ JITTER_SLEEP = float(os.getenv("JITTER_SLEEP", "1.5"))            # 랜덤 지�
 
 # HEADLESS=0 으로 실행하면 실제 크롬창이 뜸
 HEADLESS = os.getenv("HEADLESS", "1").strip() not in ("0", "false", "False", "NO", "no")
+USER_AGENT = os.getenv(
+    "USER_AGENT",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36",
+)
 
 PROPERTY_TYPES = [
     "아파트",
@@ -402,9 +408,14 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
     opts.add_argument("--disable-notifications")
     opts.add_argument("--window-size=1400,900")
     opts.add_argument("--lang=ko-KR")
+    opts.add_argument(f"--user-agent={USER_AGENT}")
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--disable-popup-blocking")
     opts.add_argument("--remote-allow-origins=*")
+    opts.add_argument("--disable-quic")
+
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
 
     # complete까지 기다리지 않고 DOMInteractive 수준에서 반환
     opts.page_load_strategy = "eager"
@@ -430,6 +441,20 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
 
     driver = webdriver.Chrome(service=service, options=opts)
     driver.set_page_load_timeout(PAGELOAD_TIMEOUT)
+
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'languages', {get: () => ['ko-KR', 'ko']});
+                Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+                """
+            },
+        )
+    except Exception:
+        pass
 
     try:
         driver.execute_cdp_cmd(
@@ -555,105 +580,140 @@ def click_tab(driver: webdriver.Chrome, tab_id: str, wait_sec=30, tab_label: Opt
         log("  - tab click skipped: ERR_EMPTY_RESPONSE page")
         return False
 
-    # 기존 컨테이너가 있으면 로그만 남김. 없어도 실패 처리하지 않음.
-    try:
-        has_old_container = driver.execute_script(
-            "return !!document.querySelector('ul.quarter-tab-cover');"
-        )
-        log(f"  - tab container quarter-tab-cover exists: {has_old_container}")
-    except Exception:
-        pass
-
-    # 1) ID로 직접 클릭
-    try:
-        el = WebDriverWait(driver, 8).until(
-            EC.presence_of_element_located((By.ID, tab_id))
-        )
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-        time.sleep(0.1)
-        driver.execute_script("arguments[0].click();", el)
-        time.sleep(0.5)
-        log(f"  - tab clicked by id: {tab_id}")
-        return True
-    except Exception as e:
-        log(f"  - tab id click failed: {tab_id} / {e}")
-
-    # 2) href/id/onclick 속성에 tab_id가 들어간 요소
-    try:
-        js = """
-        const tabId = arguments[0];
-        const els = [...document.querySelectorAll('a,button,input,li,span')];
-        const target = els.find(e => {
-            const id = e.id || '';
-            const href = e.getAttribute('href') || '';
-            const onclick = e.getAttribute('onclick') || '';
-            return id === tabId || href.includes(tabId) || onclick.includes(tabId);
-        });
-        if (target) {
-            target.scrollIntoView({block:'center'});
-            target.click();
-            return true;
-        }
-        return false;
-        """
-        if driver.execute_script(js, tab_id):
-            time.sleep(0.5)
-            log(f"  - tab clicked by attribute: {tab_id}")
-            return True
-    except Exception as e:
-        log(f"  - tab attribute click failed: {e}")
-
-    # 3) 정확한 텍스트 라벨
     lbl = tab_label or ""
-    if lbl:
+
+    def _try_click_in_current_context(context_name: str) -> bool:
+        # 기존 컨테이너가 있으면 로그만 남김. 없어도 실패 처리하지 않음.
+        try:
+            has_old_container = driver.execute_script(
+                "return !!document.querySelector('ul.quarter-tab-cover');"
+            )
+            log(f"  - {context_name}: tab container quarter-tab-cover exists: {has_old_container}")
+        except Exception:
+            pass
+
+        # 1) ID로 직접 클릭
+        try:
+            el = WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((By.ID, tab_id))
+            )
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            time.sleep(0.1)
+            driver.execute_script(
+                """
+                const el = arguments[0];
+                const target = el.closest('a,button,li,[role="tab"],[onclick]') || el;
+                target.click();
+                """,
+                el,
+            )
+            time.sleep(0.5)
+            log(f"  - tab clicked by id: {tab_id} ({context_name})")
+            return True
+        except Exception as e:
+            log(f"  - {context_name}: tab id click failed: {tab_id} / {e}")
+
+        # 2) href/id/onclick 속성에 tab_id가 들어간 요소
         try:
             js = """
-            const lbl = arguments[0].trim();
+            const tabId = arguments[0];
             const els = [...document.querySelectorAll('a,button,input,li,span,div')];
             const target = els.find(e => {
-                const txt = (e.innerText || e.value || e.textContent || '').trim();
-                return txt === lbl;
+                const id = e.id || '';
+                const href = e.getAttribute('href') || '';
+                const onclick = e.getAttribute('onclick') || '';
+                return id === tabId || href.includes(tabId) || onclick.includes(tabId);
             });
             if (target) {
-                target.scrollIntoView({block:'center'});
-                target.click();
+                const clickable = target.closest('a,button,li,[role="tab"],[onclick]') || target;
+                clickable.scrollIntoView({block:'center'});
+                clickable.click();
                 return true;
             }
             return false;
             """
-            if driver.execute_script(js, lbl):
+            if driver.execute_script(js, tab_id):
                 time.sleep(0.5)
-                log(f"  - tab clicked by exact text: {lbl}")
+                log(f"  - tab clicked by attribute: {tab_id} ({context_name})")
                 return True
         except Exception as e:
-            log(f"  - tab exact text click failed: {e}")
+            log(f"  - {context_name}: tab attribute click failed: {e}")
 
-    # 4) 유사 텍스트
-    if lbl:
+        # 3) 정확한 텍스트 라벨
+        if lbl:
+            try:
+                js = """
+                const lbl = arguments[0].trim();
+                const els = [...document.querySelectorAll('a,button,input,li,span,div')];
+                const target = els.find(e => {
+                    const style = window.getComputedStyle(e);
+                    if (style.display === 'none' || style.visibility === 'hidden') return false;
+                    const txt = (e.innerText || e.value || e.textContent || '').trim();
+                    return txt === lbl;
+                });
+                if (target) {
+                    const clickable = target.closest('a,button,li,[role="tab"],[onclick]') || target;
+                    clickable.scrollIntoView({block:'center'});
+                    clickable.click();
+                    return true;
+                }
+                return false;
+                """
+                if driver.execute_script(js, lbl):
+                    time.sleep(0.5)
+                    log(f"  - tab clicked by exact text: {lbl} ({context_name})")
+                    return True
+            except Exception as e:
+                log(f"  - {context_name}: tab exact text click failed: {e}")
+
+        # 4) 유사 텍스트
+        if lbl:
+            try:
+                key = lbl.replace("/", "").replace(" ", "")
+                js = """
+                const key = arguments[0];
+                const els = [...document.querySelectorAll('a,button,input,li,span,div')];
+                const target = els.find(e => {
+                    const style = window.getComputedStyle(e);
+                    if (style.display === 'none' || style.visibility === 'hidden') return false;
+                    const raw = (e.innerText || e.value || e.textContent || '');
+                    const txt = raw.replaceAll('/', '').replaceAll(' ', '').trim();
+                    return txt.includes(key);
+                });
+                if (target) {
+                    const clickable = target.closest('a,button,li,[role="tab"],[onclick]') || target;
+                    clickable.scrollIntoView({block:'center'});
+                    clickable.click();
+                    return true;
+                }
+                return false;
+                """
+                if driver.execute_script(js, key):
+                    time.sleep(0.5)
+                    log(f"  - tab clicked by fuzzy text: {lbl} ({context_name})")
+                    return True
+            except Exception as e:
+                log(f"  - {context_name}: tab fuzzy text click failed: {e}")
+
+        return False
+
+    # 기본 문서에서 먼저 시도
+    driver.switch_to.default_content()
+    if _try_click_in_current_context("default"):
+        return True
+
+    # 탭이 iframe/frame 안에 들어간 경우도 시도
+    frames = driver.find_elements(By.CSS_SELECTOR, "iframe,frame")
+    for idx, fr in enumerate(frames, start=1):
         try:
-            key = lbl.replace("/", "").replace(" ", "")
-            js = """
-            const key = arguments[0];
-            const els = [...document.querySelectorAll('a,button,input,li,span,div')];
-            const target = els.find(e => {
-                const raw = (e.innerText || e.value || e.textContent || '');
-                const txt = raw.replaceAll('/', '').replaceAll(' ', '').trim();
-                return txt.includes(key);
-            });
-            if (target) {
-                target.scrollIntoView({block:'center'});
-                target.click();
-                return true;
-            }
-            return false;
-            """
-            if driver.execute_script(js, key):
-                time.sleep(0.5)
-                log(f"  - tab clicked by fuzzy text: {lbl}")
+            driver.switch_to.default_content()
+            driver.switch_to.frame(fr)
+            if _try_click_in_current_context(f"frame{idx}"):
                 return True
         except Exception as e:
-            log(f"  - tab fuzzy text click failed: {e}")
+            log(f"  - frame{idx}: tab search failed: {e}")
 
+    driver.switch_to.default_content()
     save_debug(driver, f"tab_click_failed_{tab_id}_{tab_label or ''}")
     log("  - tab click failed: all strategies")
     return False
@@ -1051,19 +1111,29 @@ def open_rt_page(driver: webdriver.Chrome, nav_try: int) -> bool:
     log(f"  - nav{nav_try}: opening page {URL}")
 
     try:
+        driver.get("about:blank")
+        time.sleep(0.5)
         driver.get(URL)
     except TimeoutException:
-        log(f"  - nav{nav_try}: driver.get timeout -> window.stop()")
-        try:
-            driver.execute_script("window.stop();")
-        except Exception:
-            pass
+        log(f"  - nav{nav_try}: driver.get timeout -> keep waiting for late DOM")
     except Exception as e:
         log(f"  - nav{nav_try}: driver.get error: {e}")
         return False
 
-    time.sleep(1.5 + random.uniform(0, JITTER_SLEEP))
-    wait_page_has_body(driver, wait_sec=25)
+    # Timeout 직후 바로 window.stop()을 호출하면 국토부 페이지 스크립트가 끊겨
+    # 탭 DOM이 생성되지 않는 경우가 있다. 그래서 late DOM을 한 번 더 기다린다.
+    time.sleep(2.0 + random.uniform(0, JITTER_SLEEP))
+    wait_page_has_body(driver, wait_sec=45)
+
+    try:
+        current_url = driver.current_url
+    except Exception:
+        current_url = ""
+
+    if current_url.startswith("data:") or current_url in ("about:blank", ""):
+        log(f"  - nav{nav_try}: browser stayed on blank/data url: {current_url}")
+        save_debug(driver, f"blank_or_data_url_nav{nav_try}")
+        return False
 
     if page_has_empty_response(driver):
         log(f"  - nav{nav_try}: ERR_EMPTY_RESPONSE / empty response detected")
@@ -1071,9 +1141,12 @@ def open_rt_page(driver: webdriver.Chrome, nav_try: int) -> bool:
         return False
 
     if page_looks_unusable(driver):
-        log(f"  - nav{nav_try}: page looks unusable")
-        save_debug(driver, f"unusable_page_nav{nav_try}")
-        return False
+        log(f"  - nav{nav_try}: page still looks thin, wait once more")
+        wait_page_has_body(driver, wait_sec=30)
+        if page_looks_unusable(driver):
+            log(f"  - nav{nav_try}: page looks unusable")
+            save_debug(driver, f"unusable_page_nav{nav_try}")
+            return False
 
     return True
 
