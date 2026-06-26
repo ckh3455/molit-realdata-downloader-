@@ -11,6 +11,7 @@
 6) ERR_EMPTY_RESPONSE / 빈 응답 / 크롬 오류 페이지 감지 후 backoff 재시도
 7) 종목·월별 요청 사이 지연을 넣어 공공사이트 반복 접속 안정성 개선
 8) 국토부 사이트 접속 가능 여부를 HTTP/DNS/Socket/Chrome 프리플라이트로 선검사
+9) SOCKET FAIL / HTTP timeout 발생 시 즉시 backoff 후 재시도
 """
 
 # --- runtime dep bootstrap ---
@@ -121,8 +122,9 @@ RUN_ACCESS_TEST = os.getenv("RUN_ACCESS_TEST", "1").strip() not in ("0", "false"
 MOLIT_ACCESS_TEST_ONLY = os.getenv("MOLIT_ACCESS_TEST_ONLY", "0").strip() in ("1", "true", "True", "YES", "yes")
 BROWSER_PREFLIGHT = os.getenv("BROWSER_PREFLIGHT", "1").strip() not in ("0", "false", "False", "NO", "no")
 STRICT_PREFLIGHT = os.getenv("STRICT_PREFLIGHT", "1").strip() not in ("0", "false", "False", "NO", "no")
-ACCESS_TEST_RETRY = int(os.getenv("ACCESS_TEST_RETRY", "3"))
-ACCESS_TEST_TIMEOUT = int(os.getenv("ACCESS_TEST_TIMEOUT", "20"))
+ACCESS_TEST_RETRY = int(os.getenv("ACCESS_TEST_RETRY", "10"))
+ACCESS_TEST_TIMEOUT = int(os.getenv("ACCESS_TEST_TIMEOUT", "60"))
+ACCESS_SOCKET_RETRY_BASE = float(os.getenv("ACCESS_SOCKET_RETRY_BASE", "20"))
 
 # HEADLESS=0 으로 실행하면 실제 크롬창이 뜸
 HEADLESS = os.getenv("HEADLESS", "1").strip() not in ("0", "false", "False", "NO", "no")
@@ -197,17 +199,29 @@ def _write_access_test_report(lines):
         log(f"  - access test report save failed: {e}")
 
 
+def _access_retry_sleep(reason: str, attempt: int):
+    """
+    DNS/Socket/HTTP 사전 접속 테스트 실패 시 재시도 대기.
+    GitHub runner와 국토부 서버 사이 연결이 일시적으로 막히는 경우를 대비한다.
+    """
+    sec = ACCESS_SOCKET_RETRY_BASE + (attempt - 1) * 30 + random.uniform(0, JITTER_SLEEP)
+    log(f"{reason} retry sleep : {sec:.1f}s")
+    time.sleep(sec)
+
+
 def test_molit_access() -> bool:
     """
     Selenium을 띄우기 전에 국토부 서버가 현재 실행환경에서 열리는지 확인.
+
+    수정 포인트:
+    - SOCKET FAIL: TimeoutError 가 나오면 HTTP 단계로 억지 진행하지 않고 바로 재시도한다.
+    - DNS/Socket/HTTP 세 단계를 하나의 attempt로 묶어 ACCESS_TEST_RETRY 횟수만큼 반복한다.
+    - GitHub Actions runner IP/라우팅이 일시적으로 막히는 상황을 흡수하기 위해 기본값은 5회, 60초 timeout.
 
     확인 단계:
     1) DNS 조회
     2) 443 포트 TCP 연결
     3) urllib HTTPS GET
-
-    여기서 실패하면 코드의 탭/날짜/다운로드 로직 문제가 아니라
-    GitHub Actions runner, 방화벽, 공공사이트 접속 제한, 일시적 서버 오류일 가능성이 큼.
     """
     lines = []
 
@@ -225,30 +239,47 @@ def test_molit_access() -> bool:
     rec(f"retry         : {ACCESS_TEST_RETRY}")
 
     host = "rt.molit.go.kr"
-    ok_dns = False
-    ok_socket = False
-    ok_http = False
+    last_dns = False
+    last_socket = False
+    last_http = False
 
-    # 1) DNS 조회
-    try:
-        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
-        ips = sorted({info[4][0] for info in infos})
-        ok_dns = bool(ips)
-        rec(f"DNS OK        : {', '.join(ips[:10])}")
-    except Exception as e:
-        rec(f"DNS FAIL      : {type(e).__name__}: {e}")
+    for attempt in range(1, ACCESS_TEST_RETRY + 1):
+        rec(f"--- ACCESS attempt {attempt}/{ACCESS_TEST_RETRY} ---")
 
-    # 2) TCP 443 포트 연결
-    if ok_dns:
+        ok_dns = False
+        ok_socket = False
+        ok_http = False
+
+        # 1) DNS 조회
+        try:
+            infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+            ips = sorted({info[4][0] for info in infos})
+            ok_dns = bool(ips)
+            rec(f"DNS OK        : {', '.join(ips[:10])}")
+        except Exception as e:
+            rec(f"DNS FAIL      : {type(e).__name__}: {e}")
+            last_dns, last_socket, last_http = ok_dns, ok_socket, ok_http
+            if attempt < ACCESS_TEST_RETRY:
+                _access_retry_sleep("DNS FAIL", attempt)
+                continue
+            break
+
+        # 2) TCP 443 포트 연결
+        # 여기서 TimeoutError가 나면 국토부 페이지/셀레니움 문제가 아니라 네트워크 연결 문제다.
+        # 요구사항: SOCKET FAIL 발생 시 바로 재시도.
         try:
             with socket.create_connection((host, 443), timeout=ACCESS_TEST_TIMEOUT):
                 ok_socket = True
             rec("SOCKET OK     : TCP 443 connected")
         except Exception as e:
             rec(f"SOCKET FAIL   : {type(e).__name__}: {e}")
+            last_dns, last_socket, last_http = ok_dns, ok_socket, ok_http
+            if attempt < ACCESS_TEST_RETRY:
+                _access_retry_sleep("SOCKET FAIL", attempt)
+                continue
+            break
 
-    # 3) HTTPS GET
-    for attempt in range(1, ACCESS_TEST_RETRY + 1):
+        # 3) HTTPS GET
         try:
             req = urllib.request.Request(
                 URL,
@@ -269,32 +300,34 @@ def test_molit_access() -> bool:
 
             preview = re.sub(r"\s+", " ", text[:500]).strip()
             ok_http = bool(status and 200 <= int(status) < 400 and len(raw) > 0)
-            rec(f"HTTP attempt {attempt} OK : status={status}, bytes={len(raw)}, content-type={content_type}")
-            rec(f"HTTP final_url     : {final_url}")
-            rec(f"HTTP preview       : {preview[:300]}")
-            break
+            rec(f"HTTP OK       : status={status}, bytes={len(raw)}, content-type={content_type}")
+            rec(f"HTTP final_url: {final_url}")
+            rec(f"HTTP preview  : {preview[:300]}")
+
+            if ok_http:
+                last_dns, last_socket, last_http = ok_dns, ok_socket, ok_http
+                rec("ACCESS attempt result: OK")
+                break
 
         except urllib.error.HTTPError as e:
-            rec(f"HTTP attempt {attempt} FAIL: HTTPError {e.code} {e.reason}")
+            rec(f"HTTP FAIL     : HTTPError {e.code} {e.reason}")
         except urllib.error.URLError as e:
-            rec(f"HTTP attempt {attempt} FAIL: URLError {e.reason}")
+            rec(f"HTTP FAIL     : URLError {e.reason}")
         except Exception as e:
-            rec(f"HTTP attempt {attempt} FAIL: {type(e).__name__}: {e}")
+            rec(f"HTTP FAIL     : {type(e).__name__}: {e}")
             rec(traceback.format_exc(limit=2).strip())
 
+        last_dns, last_socket, last_http = ok_dns, ok_socket, ok_http
         if attempt < ACCESS_TEST_RETRY:
-            sleep_sec = NAV_BACKOFF_BASE + attempt * 3 + random.uniform(0, JITTER_SLEEP)
-            rec(f"HTTP retry sleep   : {sleep_sec:.1f}s")
-            time.sleep(sleep_sec)
+            _access_retry_sleep("HTTP FAIL", attempt)
 
-    rec(f"RESULT DNS     : {'OK' if ok_dns else 'FAIL'}")
-    rec(f"RESULT SOCKET  : {'OK' if ok_socket else 'FAIL'}")
-    rec(f"RESULT HTTP    : {'OK' if ok_http else 'FAIL'}")
+    rec(f"RESULT DNS     : {'OK' if last_dns else 'FAIL'}")
+    rec(f"RESULT SOCKET  : {'OK' if last_socket else 'FAIL'}")
+    rec(f"RESULT HTTP    : {'OK' if last_http else 'FAIL'}")
     rec("=== MOLIT ACCESS TEST END ===")
     _write_access_test_report(lines)
 
-    return ok_dns and ok_socket and ok_http
-
+    return last_dns and last_socket and last_http
 
 def browser_preflight(driver: webdriver.Chrome) -> bool:
     """
