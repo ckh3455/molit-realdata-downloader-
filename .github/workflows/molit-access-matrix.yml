@@ -1,0 +1,45 @@
+name: MOLIT access matrix
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: Probe ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Probe MOLIT access
+        shell: bash
+        env:
+          MOLIT_TEST_TIMEOUT: "30"
+          MOLIT_TEST_RETRY: "3"
+          MOLIT_TEST_SLEEP: "5"
+        run: |
+          python scripts/molit_access_probe.py
+
+      - name: Upload probe report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: molit-access-${{ matrix.os }}
+          path: |
+            debug/molit_access_probe.json
+            debug/molit_access_probe_summary.txt
+          if-no-files-found: warn
