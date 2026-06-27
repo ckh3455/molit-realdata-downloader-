@@ -1,15 +1,48 @@
-name: RT MOLIT pipeline (03:00 KST)
+name: Download MOLIT realdata
 
 on:
+  workflow_dispatch:
   schedule:
-    # GitHub Actions는 UTC 기준. 03:00 KST = 18:00 UTC (전날)
-    - cron: "0 18 * * *"
-  workflow_dispatch: {}
+    # 06:30 KST every day
+    - cron: "30 21 * * *"
+
+permissions:
+  contents: read
+  actions: read
 
 jobs:
-  run:
+  download:
+    name: Download realdata on Ubuntu
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
+
+    env:
+      GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+      GDRIVE_BASE_PATH: ${{ secrets.GDRIVE_BASE_PATH }}
+
+      OUT_DIR: output
+      DEBUG_DIR: debug
+
+      RUN_ACCESS_TEST: "1"
+      MOLIT_ACCESS_TEST_ONLY: "0"
+      BROWSER_PREFLIGHT: "1"
+      STRICT_PREFLIGHT: "1"
+      ACCESS_FAIL_ACTION: "fail"
+      ACCESS_TEST_RETRY: "5"
+      ACCESS_TEST_TIMEOUT: "60"
+      ACCESS_SOCKET_RETRY_BASE: "10"
+
+      HEADLESS: "1"
+      DOWNLOAD_TIMEOUT: "60"
+      CLICK_RETRY_MAX: "15"
+      CLICK_RETRY_WAIT: "1"
+      NAV_RETRY_MAX: "10"
+      PAGELOAD_TIMEOUT: "120"
+      NAV_BACKOFF_BASE: "8"
+      MONTH_SLEEP: "2"
+      CATEGORY_SLEEP: "5"
+      JITTER_SLEEP: "1.5"
 
     steps:
       - name: Checkout
@@ -20,46 +53,23 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Google Chrome
+      - name: Check Chrome
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg curl unzip
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-linux-signing-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/google-linux-signing-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
+          which google-chrome || true
+          google-chrome --version || true
 
-      - name: Show runtime info
+      - name: Run downloader
+        shell: bash
         run: |
-          python --version
-          google-chrome --version
-          pwd
-          ls -la
+          python download_realdata.py
 
-      - name: Install Python deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install \
-            "pandas>=2.2,<3" \
-            "numpy>=1.23,<3" \
-            "openpyxl>=3.1,<4" \
-            "selenium>=4.15,<5" \
-            "webdriver-manager>=4,<5" \
-            "google-api-python-client>=2,<3" \
-            "google-auth>=2,<3"
-
-      - name: Run script
-        env:
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-          GDRIVE_BASE_PATH: ${{ vars.GDRIVE_BASE_PATH }}
-          GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-          OUT_DIR: output
-          DOWNLOAD_TIMEOUT: "60"
-          CLICK_RETRY_MAX: "20"
-          CLICK_RETRY_WAIT: "1.5"
-          NAV_RETRY_MAX: "6"
-          PAGELOAD_TIMEOUT: "20"
-          CI: "1"
-          CHROME_BIN: "/usr/bin/google-chrome"
-        run: |
-          python -u download_realdata.py
+      - name: Upload debug and output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: molit-realdata-${{ github.run_id }}
+          path: |
+            debug/**
+            output/**
+          if-no-files-found: warn
