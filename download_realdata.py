@@ -66,6 +66,7 @@ import re
 import time
 import random
 import socket
+import urllib.parse
 import urllib.request
 import urllib.error
 import traceback
@@ -118,11 +119,6 @@ JITTER_SLEEP = float(os.getenv("JITTER_SLEEP", "1.5"))            # 랜덤 지�
 # MOLIT_ACCESS_TEST_ONLY=1: 다운로드는 하지 않고 접속 테스트만 수행
 # BROWSER_PREFLIGHT=1: Chrome/Selenium으로 실제 페이지 진입 테스트
 # STRICT_PREFLIGHT=1: 프리플라이트 실패 시 전체 작업 중단
-# ACCESS_FAIL_ACTION:
-#   auto     = DNS OK + SOCKET FAIL 반복이면 GitHub runner 접속 차단으로 보고 성공 종료
-#   fail     = 접속 테스트 실패 시 exit 1
-#   skip     = 접속 테스트 실패 시 작업을 건너뛰고 exit 0
-#   continue = 접속 테스트 실패 후에도 Selenium 단계 진행
 RUN_ACCESS_TEST = os.getenv("RUN_ACCESS_TEST", "1").strip() not in ("0", "false", "False", "NO", "no")
 MOLIT_ACCESS_TEST_ONLY = os.getenv("MOLIT_ACCESS_TEST_ONLY", "0").strip() in ("1", "true", "True", "YES", "yes")
 BROWSER_PREFLIGHT = os.getenv("BROWSER_PREFLIGHT", "1").strip() not in ("0", "false", "False", "NO", "no")
@@ -130,8 +126,6 @@ STRICT_PREFLIGHT = os.getenv("STRICT_PREFLIGHT", "1").strip() not in ("0", "fals
 ACCESS_TEST_RETRY = int(os.getenv("ACCESS_TEST_RETRY", "10"))
 ACCESS_TEST_TIMEOUT = int(os.getenv("ACCESS_TEST_TIMEOUT", "60"))
 ACCESS_SOCKET_RETRY_BASE = float(os.getenv("ACCESS_SOCKET_RETRY_BASE", "20"))
-ACCESS_FAIL_ACTION = os.getenv("ACCESS_FAIL_ACTION", "auto").strip().lower()
-ACCESS_SOCKET_FAIL_SKIP_AFTER = int(os.getenv("ACCESS_SOCKET_FAIL_SKIP_AFTER", "3"))
 
 # HEADLESS=0 으로 실행하면 실제 크롬창이 뜸
 HEADLESS = os.getenv("HEADLESS", "1").strip() not in ("0", "false", "False", "NO", "no")
@@ -141,6 +135,11 @@ USER_AGENT = os.getenv(
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/149.0.0.0 Safari/537.36",
 )
+
+# GitHub Actions hosted runner에서 rt.molit.go.kr 직접 접속이 막히는 경우 사용.
+# 인증 없는 프록시 예: http://1.2.3.4:8080
+# 인증 프록시도 형식상 지원: http://user:pass@1.2.3.4:8080
+MOLIT_PROXY_URL = os.getenv("MOLIT_PROXY_URL", "").strip()
 
 PROPERTY_TYPES = [
     "아파트",
@@ -190,6 +189,48 @@ def log(msg):
     print(msg, flush=True)
 
 
+def _mask_proxy_url(proxy_url: str) -> str:
+    if not proxy_url:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(proxy_url)
+        if parsed.username or parsed.password:
+            host = parsed.hostname or ""
+            port = f":{parsed.port}" if parsed.port else ""
+            return urllib.parse.urlunsplit((parsed.scheme, f"***:***@{host}{port}", parsed.path, parsed.query, parsed.fragment))
+    except Exception:
+        return "***"
+    return proxy_url
+
+
+def _parse_proxy_host_port(proxy_url: str) -> Tuple[Optional[str], Optional[int]]:
+    if not proxy_url:
+        return None, None
+    parsed = urllib.parse.urlsplit(proxy_url)
+    if not parsed.scheme or not parsed.hostname:
+        raise ValueError("MOLIT_PROXY_URL 형식이 올바르지 않습니다. 예: http://1.2.3.4:8080")
+    if parsed.scheme.lower() not in ("http", "https", "socks4", "socks5"):
+        raise ValueError("MOLIT_PROXY_URL은 http/https/socks4/socks5 형식이어야 합니다.")
+    if parsed.scheme.lower().startswith("socks"):
+        raise ValueError("현재 urllib 프리플라이트는 SOCKS 프록시를 지원하지 않습니다. HTTP 프록시를 사용하세요.")
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    return parsed.hostname, port
+
+
+def _urlopen(req, timeout):
+    """
+    MOLIT_PROXY_URL이 있으면 urllib 요청을 프록시 경유로 보낸다.
+    """
+    if MOLIT_PROXY_URL:
+        handler = urllib.request.ProxyHandler({
+            "http": MOLIT_PROXY_URL,
+            "https": MOLIT_PROXY_URL,
+        })
+        opener = urllib.request.build_opener(handler)
+        return opener.open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
 # ==================== 국토부 접속 테스트 ====================
 
 def _write_access_test_report(lines):
@@ -216,31 +257,7 @@ def _access_retry_sleep(reason: str, attempt: int):
     time.sleep(sec)
 
 
-def _new_access_result() -> dict:
-    return {
-        "ok": False,
-        "dns": False,
-        "socket": False,
-        "http": False,
-        "fail_stage": "",
-        "fail_reason": "",
-        "classification": "",
-    }
-
-
-def should_skip_for_network_block(result: dict) -> bool:
-    """
-    GitHub Actions runner에서 국토부 서버까지 TCP 연결 자체가 막힌 경우를 자동 분류.
-    DNS는 되지만 SOCKET이 반복 실패하면 스크립트/셀레니움 문제가 아니라 실행환경 문제로 본다.
-    """
-    return (
-        bool(result.get("dns"))
-        and not bool(result.get("socket"))
-        and result.get("fail_stage") == "socket"
-    )
-
-
-def test_molit_access() -> dict:
+def test_molit_access() -> bool:
     """
     Selenium을 띄우기 전에 국토부 서버가 현재 실행환경에서 열리는지 확인.
 
@@ -268,15 +285,12 @@ def test_molit_access() -> dict:
     rec(f"user_agent    : {USER_AGENT}")
     rec(f"timeout       : {ACCESS_TEST_TIMEOUT}s")
     rec(f"retry         : {ACCESS_TEST_RETRY}")
+    rec(f"proxy         : {_mask_proxy_url(MOLIT_PROXY_URL) if MOLIT_PROXY_URL else '(none)'}")
 
     host = "rt.molit.go.kr"
-    result = _new_access_result()
     last_dns = False
     last_socket = False
     last_http = False
-    last_fail_stage = ""
-    last_fail_reason = ""
-    socket_fail_count = 0
 
     for attempt in range(1, ACCESS_TEST_RETRY + 1):
         rec(f"--- ACCESS attempt {attempt}/{ACCESS_TEST_RETRY} ---")
@@ -293,36 +307,29 @@ def test_molit_access() -> dict:
             rec(f"DNS OK        : {', '.join(ips[:10])}")
         except Exception as e:
             rec(f"DNS FAIL      : {type(e).__name__}: {e}")
-            last_fail_stage = "dns"
-            last_fail_reason = f"{type(e).__name__}: {e}"
             last_dns, last_socket, last_http = ok_dns, ok_socket, ok_http
             if attempt < ACCESS_TEST_RETRY:
                 _access_retry_sleep("DNS FAIL", attempt)
                 continue
             break
 
-        # 2) TCP 443 포트 연결
-        # 여기서 TimeoutError가 나면 국토부 페이지/셀레니움 문제가 아니라 네트워크 연결 문제다.
-        # 요구사항: SOCKET FAIL 발생 시 바로 재시도.
+        # 2) TCP 연결
+        # 프록시가 없으면 국토부 443 직접 연결을 확인한다.
+        # 프록시가 있으면 GitHub runner -> 프록시 연결만 확인하고,
+        # 실제 국토부 연결성은 아래 HTTPS GET에서 프록시 경유로 검증한다.
         try:
-            with socket.create_connection((host, 443), timeout=ACCESS_TEST_TIMEOUT):
-                ok_socket = True
-            rec("SOCKET OK     : TCP 443 connected")
+            if MOLIT_PROXY_URL:
+                proxy_host, proxy_port = _parse_proxy_host_port(MOLIT_PROXY_URL)
+                with socket.create_connection((proxy_host, proxy_port), timeout=ACCESS_TEST_TIMEOUT):
+                    ok_socket = True
+                rec(f"SOCKET OK     : proxy {proxy_host}:{proxy_port} connected")
+            else:
+                with socket.create_connection((host, 443), timeout=ACCESS_TEST_TIMEOUT):
+                    ok_socket = True
+                rec("SOCKET OK     : TCP 443 connected")
         except Exception as e:
             rec(f"SOCKET FAIL   : {type(e).__name__}: {e}")
-            last_fail_stage = "socket"
-            last_fail_reason = f"{type(e).__name__}: {e}"
             last_dns, last_socket, last_http = ok_dns, ok_socket, ok_http
-            socket_fail_count += 1
-            if (
-                ACCESS_FAIL_ACTION == "auto"
-                and socket_fail_count >= ACCESS_SOCKET_FAIL_SKIP_AFTER
-            ):
-                rec(
-                    "SOCKET FAIL auto stop: "
-                    f"{socket_fail_count} consecutive socket failures"
-                )
-                break
             if attempt < ACCESS_TEST_RETRY:
                 _access_retry_sleep("SOCKET FAIL", attempt)
                 continue
@@ -340,7 +347,7 @@ def test_molit_access() -> dict:
                 },
                 method="GET",
             )
-            with urllib.request.urlopen(req, timeout=ACCESS_TEST_TIMEOUT) as resp:
+            with _urlopen(req, timeout=ACCESS_TEST_TIMEOUT) as resp:
                 status = getattr(resp, "status", None)
                 final_url = resp.geturl()
                 content_type = resp.headers.get("content-type", "")
@@ -354,25 +361,17 @@ def test_molit_access() -> dict:
             rec(f"HTTP preview  : {preview[:300]}")
 
             if ok_http:
-                last_fail_stage = ""
-                last_fail_reason = ""
                 last_dns, last_socket, last_http = ok_dns, ok_socket, ok_http
                 rec("ACCESS attempt result: OK")
                 break
 
         except urllib.error.HTTPError as e:
             rec(f"HTTP FAIL     : HTTPError {e.code} {e.reason}")
-            last_fail_stage = "http"
-            last_fail_reason = f"HTTPError {e.code} {e.reason}"
         except urllib.error.URLError as e:
             rec(f"HTTP FAIL     : URLError {e.reason}")
-            last_fail_stage = "http"
-            last_fail_reason = f"URLError {e.reason}"
         except Exception as e:
             rec(f"HTTP FAIL     : {type(e).__name__}: {e}")
             rec(traceback.format_exc(limit=2).strip())
-            last_fail_stage = "http"
-            last_fail_reason = f"{type(e).__name__}: {e}"
 
         last_dns, last_socket, last_http = ok_dns, ok_socket, ok_http
         if attempt < ACCESS_TEST_RETRY:
@@ -384,27 +383,7 @@ def test_molit_access() -> dict:
     rec("=== MOLIT ACCESS TEST END ===")
     _write_access_test_report(lines)
 
-    result.update({
-        "ok": last_dns and last_socket and last_http,
-        "dns": last_dns,
-        "socket": last_socket,
-        "http": last_http,
-        "fail_stage": last_fail_stage,
-        "fail_reason": last_fail_reason,
-    })
-
-    if result["ok"]:
-        result["classification"] = "ok"
-    elif should_skip_for_network_block(result):
-        result["classification"] = "runner_network_block"
-    elif result["dns"] and result["socket"] and not result["http"]:
-        result["classification"] = "molit_http_unstable"
-    elif not result["dns"]:
-        result["classification"] = "dns_failure"
-    else:
-        result["classification"] = "unknown_access_failure"
-
-    return result
+    return last_dns and last_socket and last_http
 
 def browser_preflight(driver: webdriver.Chrome) -> bool:
     """
@@ -690,6 +669,13 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
     opts.add_argument("--disable-popup-blocking")
     opts.add_argument("--remote-allow-origins=*")
     opts.add_argument("--disable-quic")
+
+    if MOLIT_PROXY_URL:
+        parsed = urllib.parse.urlsplit(MOLIT_PROXY_URL)
+        if parsed.username or parsed.password:
+            log("  - proxy warning: Chrome --proxy-server는 인증 프록시를 직접 처리하지 못할 수 있습니다.")
+        opts.add_argument(f"--proxy-server={MOLIT_PROXY_URL}")
+        log(f"  - Chrome proxy enabled: {_mask_proxy_url(MOLIT_PROXY_URL)}")
 
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
@@ -1563,30 +1549,11 @@ def main():
 
     # 1차 접속 테스트: Selenium 실행 전 HTTP/DNS/Socket 기준 확인
     if RUN_ACCESS_TEST:
-        access_result = test_molit_access()
-        if not access_result["ok"]:
+        access_ok = test_molit_access()
+        if not access_ok:
             log("!!! MOLIT ACCESS TEST FAILED: 현재 실행환경에서 국토부 사이트 접속이 불안정합니다.")
-            log(f"!!! access classification: {access_result.get('classification')}")
-            log(f"!!! fail stage          : {access_result.get('fail_stage')}")
-            log(f"!!! fail reason         : {access_result.get('fail_reason')}")
             log("!!! GitHub Actions라면 runner IP 차단/빈 응답/공공사이트 제한 가능성을 먼저 의심하세요.")
-
-            if MOLIT_ACCESS_TEST_ONLY:
-                raise RuntimeError("국토부 HTTP/DNS/Socket 접속 테스트 실패")
-
-            if ACCESS_FAIL_ACTION in ("skip", "success", "exit0"):
-                log("!!! ACCESS_FAIL_ACTION=skip -> 오늘 실행은 건너뛰고 성공 종료합니다.")
-                log("!!! 기존 산출물은 갱신되지 않았습니다.")
-                return
-
-            if ACCESS_FAIL_ACTION == "continue":
-                log("!!! ACCESS_FAIL_ACTION=continue -> 접속 테스트 실패에도 Selenium 단계로 진행합니다.")
-            elif ACCESS_FAIL_ACTION == "auto" and should_skip_for_network_block(access_result):
-                log("!!! 자동판단: DNS는 성공했지만 SOCKET 연결이 반복 실패했습니다.")
-                log("!!! 이는 코드 오류보다 GitHub Actions runner <-> 국토부 서버 간 접속 차단/라우팅 문제로 봅니다.")
-                log("!!! 오늘 실행은 건너뛰고 성공 종료합니다. 기존 산출물은 갱신되지 않았습니다.")
-                return
-            elif STRICT_PREFLIGHT:
+            if MOLIT_ACCESS_TEST_ONLY or STRICT_PREFLIGHT:
                 raise RuntimeError("국토부 HTTP/DNS/Socket 접속 테스트 실패")
 
     if MOLIT_ACCESS_TEST_ONLY:
@@ -1601,13 +1568,7 @@ def main():
             preflight_ok = browser_preflight(driver)
             if not preflight_ok:
                 log("!!! BROWSER PREFLIGHT FAILED: Chrome/Selenium에서 국토부 페이지 사용 불가")
-                if ACCESS_FAIL_ACTION in ("skip", "success", "exit0"):
-                    log("!!! ACCESS_FAIL_ACTION=skip -> 오늘 실행은 건너뛰고 성공 종료합니다.")
-                    log("!!! 기존 산출물은 갱신되지 않았습니다.")
-                    return
-                if ACCESS_FAIL_ACTION == "continue":
-                    log("!!! ACCESS_FAIL_ACTION=continue -> Chrome 프리플라이트 실패에도 다운로드 루프로 진행합니다.")
-                elif STRICT_PREFLIGHT:
+                if STRICT_PREFLIGHT:
                     raise RuntimeError("Chrome/Selenium 프리플라이트 실패")
 
         for prop_kind in PROPERTY_TYPES:
