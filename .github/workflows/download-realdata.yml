@@ -1,4 +1,4 @@
-name: Download MOLIT realdata via proxy
+name: Download MOLIT realdata auto rerun
 
 on:
   workflow_dispatch:
@@ -10,74 +10,238 @@ permissions:
   contents: read
   actions: read
 
+env:
+  GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+  GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+  GDRIVE_BASE_PATH: ${{ secrets.GDRIVE_BASE_PATH }}
+
+  OUT_DIR: output
+  DEBUG_DIR: debug
+
+  RUN_ACCESS_TEST: "1"
+  MOLIT_ACCESS_TEST_ONLY: "0"
+  BROWSER_PREFLIGHT: "1"
+  STRICT_PREFLIGHT: "1"
+  ACCESS_FAIL_ACTION: "fail"
+  ACCESS_TEST_RETRY: "1"
+  ACCESS_TEST_TIMEOUT: "25"
+  ACCESS_SOCKET_RETRY_BASE: "1"
+
+  HEADLESS: "1"
+  DOWNLOAD_TIMEOUT: "60"
+  CLICK_RETRY_MAX: "15"
+  CLICK_RETRY_WAIT: "1"
+  NAV_RETRY_MAX: "10"
+  PAGELOAD_TIMEOUT: "120"
+  NAV_BACKOFF_BASE: "8"
+  MONTH_SLEEP: "2"
+  CATEGORY_SLEEP: "5"
+  JITTER_SLEEP: "1.5"
+
 jobs:
-  download:
-    name: Download realdata via proxy
+  attempt1:
+    name: Attempt 1
     runs-on: ubuntu-latest
     timeout-minutes: 180
-
-    env:
-      # Proxy for rt.molit.go.kr
-      # GitHub secret example: http://1.2.3.4:8080
-      MOLIT_PROXY_URL: ${{ secrets.MOLIT_PROXY_URL }}
-
-      # Google Drive upload
-      GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-      GDRIVE_BASE_PATH: ${{ secrets.GDRIVE_BASE_PATH }}
-
-      # Output/debug folders
-      OUT_DIR: output
-      DEBUG_DIR: debug
-
-      # MOLIT access preflight
-      RUN_ACCESS_TEST: "1"
-      MOLIT_ACCESS_TEST_ONLY: "0"
-      BROWSER_PREFLIGHT: "1"
-      STRICT_PREFLIGHT: "1"
-      ACCESS_FAIL_ACTION: "fail"
-      ACCESS_TEST_RETRY: "5"
-      ACCESS_TEST_TIMEOUT: "60"
-      ACCESS_SOCKET_RETRY_BASE: "10"
-
-      # Browser/download stability
-      HEADLESS: "1"
-      DOWNLOAD_TIMEOUT: "60"
-      CLICK_RETRY_MAX: "15"
-      CLICK_RETRY_WAIT: "1"
-      NAV_RETRY_MAX: "10"
-      PAGELOAD_TIMEOUT: "120"
-      NAV_BACKOFF_BASE: "8"
-      MONTH_SLEEP: "2"
-      CATEGORY_SLEEP: "5"
-      JITTER_SLEEP: "1.5"
-
+    outputs:
+      success: ${{ steps.mark_success.outputs.success }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Check Chrome
-        shell: bash
-        run: |
-          which google-chrome || true
-          google-chrome --version || true
-
       - name: Run downloader
         shell: bash
-        run: |
-          python download_realdata.py
-
+        run: python download_realdata.py
+      - name: Mark success
+        id: mark_success
+        shell: bash
+        run: echo "success=1" >> "$GITHUB_OUTPUT"
       - name: Upload debug and output artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: molit-realdata-proxy-${{ github.run_id }}
+          name: molit-realdata-attempt1-${{ github.run_id }}
           path: |
             debug/**
             output/**
           if-no-files-found: warn
+
+  attempt2:
+    name: Attempt 2
+    needs: attempt1
+    if: always() && needs.attempt1.outputs.success != '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      success: ${{ steps.mark_success.outputs.success }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run downloader
+        shell: bash
+        run: python download_realdata.py
+      - name: Mark success
+        id: mark_success
+        shell: bash
+        run: echo "success=1" >> "$GITHUB_OUTPUT"
+      - name: Upload debug and output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: molit-realdata-attempt2-${{ github.run_id }}
+          path: |
+            debug/**
+            output/**
+          if-no-files-found: warn
+
+  attempt3:
+    name: Attempt 3
+    needs: [attempt1, attempt2]
+    if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      success: ${{ steps.mark_success.outputs.success }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run downloader
+        shell: bash
+        run: python download_realdata.py
+      - name: Mark success
+        id: mark_success
+        shell: bash
+        run: echo "success=1" >> "$GITHUB_OUTPUT"
+      - name: Upload debug and output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: molit-realdata-attempt3-${{ github.run_id }}
+          path: |
+            debug/**
+            output/**
+          if-no-files-found: warn
+
+  attempt4:
+    name: Attempt 4
+    needs: [attempt1, attempt2, attempt3]
+    if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1' && needs.attempt3.outputs.success != '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      success: ${{ steps.mark_success.outputs.success }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run downloader
+        shell: bash
+        run: python download_realdata.py
+      - name: Mark success
+        id: mark_success
+        shell: bash
+        run: echo "success=1" >> "$GITHUB_OUTPUT"
+      - name: Upload debug and output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: molit-realdata-attempt4-${{ github.run_id }}
+          path: |
+            debug/**
+            output/**
+          if-no-files-found: warn
+
+  attempt5:
+    name: Attempt 5
+    needs: [attempt1, attempt2, attempt3, attempt4]
+    if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1' && needs.attempt3.outputs.success != '1' && needs.attempt4.outputs.success != '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      success: ${{ steps.mark_success.outputs.success }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run downloader
+        shell: bash
+        run: python download_realdata.py
+      - name: Mark success
+        id: mark_success
+        shell: bash
+        run: echo "success=1" >> "$GITHUB_OUTPUT"
+      - name: Upload debug and output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: molit-realdata-attempt5-${{ github.run_id }}
+          path: |
+            debug/**
+            output/**
+          if-no-files-found: warn
+
+  attempt6:
+    name: Attempt 6
+    needs: [attempt1, attempt2, attempt3, attempt4, attempt5]
+    if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1' && needs.attempt3.outputs.success != '1' && needs.attempt4.outputs.success != '1' && needs.attempt5.outputs.success != '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      success: ${{ steps.mark_success.outputs.success }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run downloader
+        shell: bash
+        run: python download_realdata.py
+      - name: Mark success
+        id: mark_success
+        shell: bash
+        run: echo "success=1" >> "$GITHUB_OUTPUT"
+      - name: Upload debug and output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: molit-realdata-attempt6-${{ github.run_id }}
+          path: |
+            debug/**
+            output/**
+          if-no-files-found: warn
+
+  final:
+    name: Final result
+    needs: [attempt1, attempt2, attempt3, attempt4, attempt5, attempt6]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check attempts
+        shell: bash
+        run: |
+          echo "attempt1=${{ needs.attempt1.outputs.success }}"
+          echo "attempt2=${{ needs.attempt2.outputs.success }}"
+          echo "attempt3=${{ needs.attempt3.outputs.success }}"
+          echo "attempt4=${{ needs.attempt4.outputs.success }}"
+          echo "attempt5=${{ needs.attempt5.outputs.success }}"
+          echo "attempt6=${{ needs.attempt6.outputs.success }}"
+
+          if [ "${{ needs.attempt1.outputs.success }}" = "1" ] || \
+             [ "${{ needs.attempt2.outputs.success }}" = "1" ] || \
+             [ "${{ needs.attempt3.outputs.success }}" = "1" ] || \
+             [ "${{ needs.attempt4.outputs.success }}" = "1" ] || \
+             [ "${{ needs.attempt5.outputs.success }}" = "1" ] || \
+             [ "${{ needs.attempt6.outputs.success }}" = "1" ]; then
+            echo "At least one attempt succeeded."
+            exit 0
+          fi
+
+          echo "All attempts failed."
+          exit 1
