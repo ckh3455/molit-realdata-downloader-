@@ -32,7 +32,7 @@ jobs:
           MOLIT_TEST_RETRY: "3"
           MOLIT_TEST_SLEEP: "5"
         run: |
-          python scripts/molit_access_probe.py
+          python molit_access_probe.py
 
       - name: Upload probe report
         if: always()
