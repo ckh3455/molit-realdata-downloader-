@@ -1,4 +1,4 @@
-name: Download MOLIT realdata Ubuntu pool
+name: Download MOLIT realdata via proxy
 
 on:
   workflow_dispatch:
@@ -12,17 +12,15 @@ permissions:
 
 jobs:
   download:
-    name: Ubuntu attempt ${{ matrix.slot }}
+    name: Download realdata via proxy
     runs-on: ubuntu-latest
     timeout-minutes: 180
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      max-parallel: 6
-      matrix:
-        slot: [1, 2, 3, 4, 5, 6]
 
     env:
+      # Proxy for rt.molit.go.kr
+      # GitHub secret example: http://1.2.3.4:8080
+      MOLIT_PROXY_URL: ${{ secrets.MOLIT_PROXY_URL }}
+
       # Google Drive upload
       GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
@@ -31,6 +29,16 @@ jobs:
       # Output/debug folders
       OUT_DIR: output
       DEBUG_DIR: debug
+
+      # MOLIT access preflight
+      RUN_ACCESS_TEST: "1"
+      MOLIT_ACCESS_TEST_ONLY: "0"
+      BROWSER_PREFLIGHT: "1"
+      STRICT_PREFLIGHT: "1"
+      ACCESS_FAIL_ACTION: "fail"
+      ACCESS_TEST_RETRY: "5"
+      ACCESS_TEST_TIMEOUT: "60"
+      ACCESS_SOCKET_RETRY_BASE: "10"
 
       # Browser/download stability
       HEADLESS: "1"
@@ -53,97 +61,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Preflight MOLIT access
-        id: preflight
+      - name: Check Chrome
         shell: bash
         run: |
-          python - <<'PY'
-          import os
-          import socket
-          import ssl
-          import sys
-          import time
-          import urllib.request
-
-          host = "rt.molit.go.kr"
-          url = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
-          timeout = 20
-          ok = False
-
-          def log(msg):
-              print(msg, flush=True)
-
-          log("=== MOLIT PREFLIGHT START ===")
-          log(f"slot          : {os.getenv('MATRIX_SLOT', '')}")
-          try:
-              with urllib.request.urlopen("https://api.ipify.org", timeout=10) as resp:
-                  log(f"public_ip     : {resp.read().decode().strip()}")
-          except Exception as e:
-              log(f"public_ip     : unknown ({type(e).__name__}: {e})")
-
-          for attempt in range(1, 3):
-              log(f"--- preflight attempt {attempt}/2 ---")
-              try:
-                  ips = sorted({info[4][0] for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
-                  log(f"DNS OK        : {', '.join(ips)}")
-
-                  started = time.time()
-                  with socket.create_connection((host, 443), timeout=timeout):
-                      log(f"TCP OK        : {time.time() - started:.3f}s")
-
-                  context = ssl.create_default_context()
-                  started = time.time()
-                  with socket.create_connection((host, 443), timeout=timeout) as raw_sock:
-                      with context.wrap_socket(raw_sock, server_hostname=host):
-                          log(f"TLS OK        : {time.time() - started:.3f}s")
-
-                  req = urllib.request.Request(
-                      url,
-                      headers={
-                          "User-Agent": (
-                              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                              "AppleWebKit/537.36 (KHTML, like Gecko) "
-                              "Chrome/149.0.0.0 Safari/537.36"
-                          ),
-                          "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.7,en;q=0.6",
-                      },
-                  )
-                  with urllib.request.urlopen(req, timeout=timeout) as resp:
-                      raw = resp.read(1024)
-                      log(f"HTTP OK       : status={resp.status}, bytes={len(raw)}")
-
-                  ok = True
-                  break
-              except Exception as e:
-                  log(f"PREFLIGHT FAIL: {type(e).__name__}: {e}")
-                  time.sleep(3)
-
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
-              f.write(f"MOLIT_PREFLIGHT_OK={'1' if ok else '0'}\n")
-
-          log(f"RESULT         : {'OK' if ok else 'FAIL'}")
-          log("=== MOLIT PREFLIGHT END ===")
-          sys.exit(0)
-          PY
-        env:
-          MATRIX_SLOT: ${{ matrix.slot }}
-
-      - name: Skip blocked runner
-        if: env.MOLIT_PREFLIGHT_OK != '1'
-        shell: bash
-        run: |
-          echo "This Ubuntu runner cannot reach rt.molit.go.kr."
-          echo "Skipping this matrix slot without failing the whole workflow."
+          which google-chrome || true
+          google-chrome --version || true
 
       - name: Run downloader
-        if: env.MOLIT_PREFLIGHT_OK == '1'
         shell: bash
-        env:
-          # Same runner already passed preflight. Avoid wasting time on another long socket test.
-          RUN_ACCESS_TEST: "0"
-          MOLIT_ACCESS_TEST_ONLY: "0"
-          BROWSER_PREFLIGHT: "1"
-          STRICT_PREFLIGHT: "1"
         run: |
           python download_realdata.py
 
@@ -151,7 +76,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: molit-realdata-slot-${{ matrix.slot }}-${{ github.run_id }}
+          name: molit-realdata-proxy-${{ github.run_id }}
           path: |
             debug/**
             output/**
