@@ -18,14 +18,11 @@ env:
   OUT_DIR: output
   DEBUG_DIR: debug
 
-  RUN_ACCESS_TEST: "1"
+  # The job-level preflight already checked this runner.
+  RUN_ACCESS_TEST: "0"
   MOLIT_ACCESS_TEST_ONLY: "0"
   BROWSER_PREFLIGHT: "1"
   STRICT_PREFLIGHT: "1"
-  ACCESS_FAIL_ACTION: "fail"
-  ACCESS_TEST_RETRY: "1"
-  ACCESS_TEST_TIMEOUT: "25"
-  ACCESS_SOCKET_RETRY_BASE: "1"
 
   HEADLESS: "1"
   DOWNLOAD_TIMEOUT: "60"
@@ -42,6 +39,7 @@ jobs:
   attempt1:
     name: Attempt 1
     runs-on: ubuntu-latest
+    continue-on-error: true
     timeout-minutes: 180
     outputs:
       success: ${{ steps.mark_success.outputs.success }}
@@ -50,6 +48,40 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Preflight MOLIT access
+        shell: bash
+        run: |
+          python - <<'PY'
+          import socket, ssl, sys, time, urllib.request
+          host = "rt.molit.go.kr"
+          url = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
+          timeout = 20
+          print("=== MOLIT QUICK PREFLIGHT START ===", flush=True)
+          try:
+              with urllib.request.urlopen("https://api.ipify.org", timeout=10) as resp:
+                  print("public_ip :", resp.read().decode().strip(), flush=True)
+          except Exception as e:
+              print("public_ip : unknown", type(e).__name__, e, flush=True)
+          try:
+              ips = sorted({info[4][0] for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+              print("DNS OK    :", ", ".join(ips), flush=True)
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout):
+                  print(f"TCP OK    : {time.time() - started:.3f}s", flush=True)
+              ctx = ssl.create_default_context()
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout) as raw:
+                  with ctx.wrap_socket(raw, server_hostname=host):
+                      print(f"TLS OK    : {time.time() - started:.3f}s", flush=True)
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ko-KR,ko;q=0.9"})
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  raw = resp.read(1024)
+                  print(f"HTTP OK   : status={resp.status}, bytes={len(raw)}", flush=True)
+              print("RESULT    : OK", flush=True)
+          except Exception as e:
+              print(f"RESULT    : FAIL ({type(e).__name__}: {e})", flush=True)
+              sys.exit(1)
+          PY
       - name: Run downloader
         shell: bash
         run: python download_realdata.py
@@ -72,6 +104,7 @@ jobs:
     needs: attempt1
     if: always() && needs.attempt1.outputs.success != '1'
     runs-on: ubuntu-latest
+    continue-on-error: true
     timeout-minutes: 180
     outputs:
       success: ${{ steps.mark_success.outputs.success }}
@@ -80,6 +113,40 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Preflight MOLIT access
+        shell: bash
+        run: |
+          python - <<'PY'
+          import socket, ssl, sys, time, urllib.request
+          host = "rt.molit.go.kr"
+          url = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
+          timeout = 20
+          print("=== MOLIT QUICK PREFLIGHT START ===", flush=True)
+          try:
+              with urllib.request.urlopen("https://api.ipify.org", timeout=10) as resp:
+                  print("public_ip :", resp.read().decode().strip(), flush=True)
+          except Exception as e:
+              print("public_ip : unknown", type(e).__name__, e, flush=True)
+          try:
+              ips = sorted({info[4][0] for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+              print("DNS OK    :", ", ".join(ips), flush=True)
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout):
+                  print(f"TCP OK    : {time.time() - started:.3f}s", flush=True)
+              ctx = ssl.create_default_context()
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout) as raw:
+                  with ctx.wrap_socket(raw, server_hostname=host):
+                      print(f"TLS OK    : {time.time() - started:.3f}s", flush=True)
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ko-KR,ko;q=0.9"})
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  raw = resp.read(1024)
+                  print(f"HTTP OK   : status={resp.status}, bytes={len(raw)}", flush=True)
+              print("RESULT    : OK", flush=True)
+          except Exception as e:
+              print(f"RESULT    : FAIL ({type(e).__name__}: {e})", flush=True)
+              sys.exit(1)
+          PY
       - name: Run downloader
         shell: bash
         run: python download_realdata.py
@@ -102,6 +169,7 @@ jobs:
     needs: [attempt1, attempt2]
     if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1'
     runs-on: ubuntu-latest
+    continue-on-error: true
     timeout-minutes: 180
     outputs:
       success: ${{ steps.mark_success.outputs.success }}
@@ -110,6 +178,40 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Preflight MOLIT access
+        shell: bash
+        run: |
+          python - <<'PY'
+          import socket, ssl, sys, time, urllib.request
+          host = "rt.molit.go.kr"
+          url = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
+          timeout = 20
+          print("=== MOLIT QUICK PREFLIGHT START ===", flush=True)
+          try:
+              with urllib.request.urlopen("https://api.ipify.org", timeout=10) as resp:
+                  print("public_ip :", resp.read().decode().strip(), flush=True)
+          except Exception as e:
+              print("public_ip : unknown", type(e).__name__, e, flush=True)
+          try:
+              ips = sorted({info[4][0] for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+              print("DNS OK    :", ", ".join(ips), flush=True)
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout):
+                  print(f"TCP OK    : {time.time() - started:.3f}s", flush=True)
+              ctx = ssl.create_default_context()
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout) as raw:
+                  with ctx.wrap_socket(raw, server_hostname=host):
+                      print(f"TLS OK    : {time.time() - started:.3f}s", flush=True)
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ko-KR,ko;q=0.9"})
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  raw = resp.read(1024)
+                  print(f"HTTP OK   : status={resp.status}, bytes={len(raw)}", flush=True)
+              print("RESULT    : OK", flush=True)
+          except Exception as e:
+              print(f"RESULT    : FAIL ({type(e).__name__}: {e})", flush=True)
+              sys.exit(1)
+          PY
       - name: Run downloader
         shell: bash
         run: python download_realdata.py
@@ -132,6 +234,7 @@ jobs:
     needs: [attempt1, attempt2, attempt3]
     if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1' && needs.attempt3.outputs.success != '1'
     runs-on: ubuntu-latest
+    continue-on-error: true
     timeout-minutes: 180
     outputs:
       success: ${{ steps.mark_success.outputs.success }}
@@ -140,6 +243,40 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Preflight MOLIT access
+        shell: bash
+        run: |
+          python - <<'PY'
+          import socket, ssl, sys, time, urllib.request
+          host = "rt.molit.go.kr"
+          url = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
+          timeout = 20
+          print("=== MOLIT QUICK PREFLIGHT START ===", flush=True)
+          try:
+              with urllib.request.urlopen("https://api.ipify.org", timeout=10) as resp:
+                  print("public_ip :", resp.read().decode().strip(), flush=True)
+          except Exception as e:
+              print("public_ip : unknown", type(e).__name__, e, flush=True)
+          try:
+              ips = sorted({info[4][0] for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+              print("DNS OK    :", ", ".join(ips), flush=True)
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout):
+                  print(f"TCP OK    : {time.time() - started:.3f}s", flush=True)
+              ctx = ssl.create_default_context()
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout) as raw:
+                  with ctx.wrap_socket(raw, server_hostname=host):
+                      print(f"TLS OK    : {time.time() - started:.3f}s", flush=True)
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ko-KR,ko;q=0.9"})
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  raw = resp.read(1024)
+                  print(f"HTTP OK   : status={resp.status}, bytes={len(raw)}", flush=True)
+              print("RESULT    : OK", flush=True)
+          except Exception as e:
+              print(f"RESULT    : FAIL ({type(e).__name__}: {e})", flush=True)
+              sys.exit(1)
+          PY
       - name: Run downloader
         shell: bash
         run: python download_realdata.py
@@ -162,6 +299,7 @@ jobs:
     needs: [attempt1, attempt2, attempt3, attempt4]
     if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1' && needs.attempt3.outputs.success != '1' && needs.attempt4.outputs.success != '1'
     runs-on: ubuntu-latest
+    continue-on-error: true
     timeout-minutes: 180
     outputs:
       success: ${{ steps.mark_success.outputs.success }}
@@ -170,6 +308,40 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Preflight MOLIT access
+        shell: bash
+        run: |
+          python - <<'PY'
+          import socket, ssl, sys, time, urllib.request
+          host = "rt.molit.go.kr"
+          url = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
+          timeout = 20
+          print("=== MOLIT QUICK PREFLIGHT START ===", flush=True)
+          try:
+              with urllib.request.urlopen("https://api.ipify.org", timeout=10) as resp:
+                  print("public_ip :", resp.read().decode().strip(), flush=True)
+          except Exception as e:
+              print("public_ip : unknown", type(e).__name__, e, flush=True)
+          try:
+              ips = sorted({info[4][0] for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+              print("DNS OK    :", ", ".join(ips), flush=True)
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout):
+                  print(f"TCP OK    : {time.time() - started:.3f}s", flush=True)
+              ctx = ssl.create_default_context()
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout) as raw:
+                  with ctx.wrap_socket(raw, server_hostname=host):
+                      print(f"TLS OK    : {time.time() - started:.3f}s", flush=True)
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ko-KR,ko;q=0.9"})
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  raw = resp.read(1024)
+                  print(f"HTTP OK   : status={resp.status}, bytes={len(raw)}", flush=True)
+              print("RESULT    : OK", flush=True)
+          except Exception as e:
+              print(f"RESULT    : FAIL ({type(e).__name__}: {e})", flush=True)
+              sys.exit(1)
+          PY
       - name: Run downloader
         shell: bash
         run: python download_realdata.py
@@ -192,6 +364,7 @@ jobs:
     needs: [attempt1, attempt2, attempt3, attempt4, attempt5]
     if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1' && needs.attempt3.outputs.success != '1' && needs.attempt4.outputs.success != '1' && needs.attempt5.outputs.success != '1'
     runs-on: ubuntu-latest
+    continue-on-error: true
     timeout-minutes: 180
     outputs:
       success: ${{ steps.mark_success.outputs.success }}
@@ -200,6 +373,40 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Preflight MOLIT access
+        shell: bash
+        run: |
+          python - <<'PY'
+          import socket, ssl, sys, time, urllib.request
+          host = "rt.molit.go.kr"
+          url = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
+          timeout = 20
+          print("=== MOLIT QUICK PREFLIGHT START ===", flush=True)
+          try:
+              with urllib.request.urlopen("https://api.ipify.org", timeout=10) as resp:
+                  print("public_ip :", resp.read().decode().strip(), flush=True)
+          except Exception as e:
+              print("public_ip : unknown", type(e).__name__, e, flush=True)
+          try:
+              ips = sorted({info[4][0] for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+              print("DNS OK    :", ", ".join(ips), flush=True)
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout):
+                  print(f"TCP OK    : {time.time() - started:.3f}s", flush=True)
+              ctx = ssl.create_default_context()
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout) as raw:
+                  with ctx.wrap_socket(raw, server_hostname=host):
+                      print(f"TLS OK    : {time.time() - started:.3f}s", flush=True)
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ko-KR,ko;q=0.9"})
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  raw = resp.read(1024)
+                  print(f"HTTP OK   : status={resp.status}, bytes={len(raw)}", flush=True)
+              print("RESULT    : OK", flush=True)
+          except Exception as e:
+              print(f"RESULT    : FAIL ({type(e).__name__}: {e})", flush=True)
+              sys.exit(1)
+          PY
       - name: Run downloader
         shell: bash
         run: python download_realdata.py
@@ -217,9 +424,269 @@ jobs:
             output/**
           if-no-files-found: warn
 
+  attempt7:
+    name: Attempt 7
+    needs: [attempt1, attempt2, attempt3, attempt4, attempt5, attempt6]
+    if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1' && needs.attempt3.outputs.success != '1' && needs.attempt4.outputs.success != '1' && needs.attempt5.outputs.success != '1' && needs.attempt6.outputs.success != '1'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 180
+    outputs:
+      success: ${{ steps.mark_success.outputs.success }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Preflight MOLIT access
+        shell: bash
+        run: |
+          python - <<'PY'
+          import socket, ssl, sys, time, urllib.request
+          host = "rt.molit.go.kr"
+          url = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
+          timeout = 20
+          print("=== MOLIT QUICK PREFLIGHT START ===", flush=True)
+          try:
+              with urllib.request.urlopen("https://api.ipify.org", timeout=10) as resp:
+                  print("public_ip :", resp.read().decode().strip(), flush=True)
+          except Exception as e:
+              print("public_ip : unknown", type(e).__name__, e, flush=True)
+          try:
+              ips = sorted({info[4][0] for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+              print("DNS OK    :", ", ".join(ips), flush=True)
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout):
+                  print(f"TCP OK    : {time.time() - started:.3f}s", flush=True)
+              ctx = ssl.create_default_context()
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout) as raw:
+                  with ctx.wrap_socket(raw, server_hostname=host):
+                      print(f"TLS OK    : {time.time() - started:.3f}s", flush=True)
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ko-KR,ko;q=0.9"})
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  raw = resp.read(1024)
+                  print(f"HTTP OK   : status={resp.status}, bytes={len(raw)}", flush=True)
+              print("RESULT    : OK", flush=True)
+          except Exception as e:
+              print(f"RESULT    : FAIL ({type(e).__name__}: {e})", flush=True)
+              sys.exit(1)
+          PY
+      - name: Run downloader
+        shell: bash
+        run: python download_realdata.py
+      - name: Mark success
+        id: mark_success
+        shell: bash
+        run: echo "success=1" >> "$GITHUB_OUTPUT"
+      - name: Upload debug and output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: molit-realdata-attempt7-${{ github.run_id }}
+          path: |
+            debug/**
+            output/**
+          if-no-files-found: warn
+
+  attempt8:
+    name: Attempt 8
+    needs: [attempt1, attempt2, attempt3, attempt4, attempt5, attempt6, attempt7]
+    if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1' && needs.attempt3.outputs.success != '1' && needs.attempt4.outputs.success != '1' && needs.attempt5.outputs.success != '1' && needs.attempt6.outputs.success != '1' && needs.attempt7.outputs.success != '1'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 180
+    outputs:
+      success: ${{ steps.mark_success.outputs.success }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Preflight MOLIT access
+        shell: bash
+        run: |
+          python - <<'PY'
+          import socket, ssl, sys, time, urllib.request
+          host = "rt.molit.go.kr"
+          url = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
+          timeout = 20
+          print("=== MOLIT QUICK PREFLIGHT START ===", flush=True)
+          try:
+              with urllib.request.urlopen("https://api.ipify.org", timeout=10) as resp:
+                  print("public_ip :", resp.read().decode().strip(), flush=True)
+          except Exception as e:
+              print("public_ip : unknown", type(e).__name__, e, flush=True)
+          try:
+              ips = sorted({info[4][0] for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+              print("DNS OK    :", ", ".join(ips), flush=True)
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout):
+                  print(f"TCP OK    : {time.time() - started:.3f}s", flush=True)
+              ctx = ssl.create_default_context()
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout) as raw:
+                  with ctx.wrap_socket(raw, server_hostname=host):
+                      print(f"TLS OK    : {time.time() - started:.3f}s", flush=True)
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ko-KR,ko;q=0.9"})
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  raw = resp.read(1024)
+                  print(f"HTTP OK   : status={resp.status}, bytes={len(raw)}", flush=True)
+              print("RESULT    : OK", flush=True)
+          except Exception as e:
+              print(f"RESULT    : FAIL ({type(e).__name__}: {e})", flush=True)
+              sys.exit(1)
+          PY
+      - name: Run downloader
+        shell: bash
+        run: python download_realdata.py
+      - name: Mark success
+        id: mark_success
+        shell: bash
+        run: echo "success=1" >> "$GITHUB_OUTPUT"
+      - name: Upload debug and output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: molit-realdata-attempt8-${{ github.run_id }}
+          path: |
+            debug/**
+            output/**
+          if-no-files-found: warn
+
+  attempt9:
+    name: Attempt 9
+    needs: [attempt1, attempt2, attempt3, attempt4, attempt5, attempt6, attempt7, attempt8]
+    if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1' && needs.attempt3.outputs.success != '1' && needs.attempt4.outputs.success != '1' && needs.attempt5.outputs.success != '1' && needs.attempt6.outputs.success != '1' && needs.attempt7.outputs.success != '1' && needs.attempt8.outputs.success != '1'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 180
+    outputs:
+      success: ${{ steps.mark_success.outputs.success }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Preflight MOLIT access
+        shell: bash
+        run: |
+          python - <<'PY'
+          import socket, ssl, sys, time, urllib.request
+          host = "rt.molit.go.kr"
+          url = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
+          timeout = 20
+          print("=== MOLIT QUICK PREFLIGHT START ===", flush=True)
+          try:
+              with urllib.request.urlopen("https://api.ipify.org", timeout=10) as resp:
+                  print("public_ip :", resp.read().decode().strip(), flush=True)
+          except Exception as e:
+              print("public_ip : unknown", type(e).__name__, e, flush=True)
+          try:
+              ips = sorted({info[4][0] for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+              print("DNS OK    :", ", ".join(ips), flush=True)
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout):
+                  print(f"TCP OK    : {time.time() - started:.3f}s", flush=True)
+              ctx = ssl.create_default_context()
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout) as raw:
+                  with ctx.wrap_socket(raw, server_hostname=host):
+                      print(f"TLS OK    : {time.time() - started:.3f}s", flush=True)
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ko-KR,ko;q=0.9"})
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  raw = resp.read(1024)
+                  print(f"HTTP OK   : status={resp.status}, bytes={len(raw)}", flush=True)
+              print("RESULT    : OK", flush=True)
+          except Exception as e:
+              print(f"RESULT    : FAIL ({type(e).__name__}: {e})", flush=True)
+              sys.exit(1)
+          PY
+      - name: Run downloader
+        shell: bash
+        run: python download_realdata.py
+      - name: Mark success
+        id: mark_success
+        shell: bash
+        run: echo "success=1" >> "$GITHUB_OUTPUT"
+      - name: Upload debug and output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: molit-realdata-attempt9-${{ github.run_id }}
+          path: |
+            debug/**
+            output/**
+          if-no-files-found: warn
+
+  attempt10:
+    name: Attempt 10
+    needs: [attempt1, attempt2, attempt3, attempt4, attempt5, attempt6, attempt7, attempt8, attempt9]
+    if: always() && needs.attempt1.outputs.success != '1' && needs.attempt2.outputs.success != '1' && needs.attempt3.outputs.success != '1' && needs.attempt4.outputs.success != '1' && needs.attempt5.outputs.success != '1' && needs.attempt6.outputs.success != '1' && needs.attempt7.outputs.success != '1' && needs.attempt8.outputs.success != '1' && needs.attempt9.outputs.success != '1'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 180
+    outputs:
+      success: ${{ steps.mark_success.outputs.success }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Preflight MOLIT access
+        shell: bash
+        run: |
+          python - <<'PY'
+          import socket, ssl, sys, time, urllib.request
+          host = "rt.molit.go.kr"
+          url = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
+          timeout = 20
+          print("=== MOLIT QUICK PREFLIGHT START ===", flush=True)
+          try:
+              with urllib.request.urlopen("https://api.ipify.org", timeout=10) as resp:
+                  print("public_ip :", resp.read().decode().strip(), flush=True)
+          except Exception as e:
+              print("public_ip : unknown", type(e).__name__, e, flush=True)
+          try:
+              ips = sorted({info[4][0] for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+              print("DNS OK    :", ", ".join(ips), flush=True)
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout):
+                  print(f"TCP OK    : {time.time() - started:.3f}s", flush=True)
+              ctx = ssl.create_default_context()
+              started = time.time()
+              with socket.create_connection((host, 443), timeout=timeout) as raw:
+                  with ctx.wrap_socket(raw, server_hostname=host):
+                      print(f"TLS OK    : {time.time() - started:.3f}s", flush=True)
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "ko-KR,ko;q=0.9"})
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  raw = resp.read(1024)
+                  print(f"HTTP OK   : status={resp.status}, bytes={len(raw)}", flush=True)
+              print("RESULT    : OK", flush=True)
+          except Exception as e:
+              print(f"RESULT    : FAIL ({type(e).__name__}: {e})", flush=True)
+              sys.exit(1)
+          PY
+      - name: Run downloader
+        shell: bash
+        run: python download_realdata.py
+      - name: Mark success
+        id: mark_success
+        shell: bash
+        run: echo "success=1" >> "$GITHUB_OUTPUT"
+      - name: Upload debug and output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: molit-realdata-attempt10-${{ github.run_id }}
+          path: |
+            debug/**
+            output/**
+          if-no-files-found: warn
+
   final:
     name: Final result
-    needs: [attempt1, attempt2, attempt3, attempt4, attempt5, attempt6]
+    needs: [attempt1, attempt2, attempt3, attempt4, attempt5, attempt6, attempt7, attempt8, attempt9, attempt10]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -232,13 +699,21 @@ jobs:
           echo "attempt4=${{ needs.attempt4.outputs.success }}"
           echo "attempt5=${{ needs.attempt5.outputs.success }}"
           echo "attempt6=${{ needs.attempt6.outputs.success }}"
+          echo "attempt7=${{ needs.attempt7.outputs.success }}"
+          echo "attempt8=${{ needs.attempt8.outputs.success }}"
+          echo "attempt9=${{ needs.attempt9.outputs.success }}"
+          echo "attempt10=${{ needs.attempt10.outputs.success }}"
 
           if [ "${{ needs.attempt1.outputs.success }}" = "1" ] || \
              [ "${{ needs.attempt2.outputs.success }}" = "1" ] || \
              [ "${{ needs.attempt3.outputs.success }}" = "1" ] || \
              [ "${{ needs.attempt4.outputs.success }}" = "1" ] || \
              [ "${{ needs.attempt5.outputs.success }}" = "1" ] || \
-             [ "${{ needs.attempt6.outputs.success }}" = "1" ]; then
+             [ "${{ needs.attempt6.outputs.success }}" = "1" ] || \
+             [ "${{ needs.attempt7.outputs.success }}" = "1" ] || \
+             [ "${{ needs.attempt8.outputs.success }}" = "1" ] || \
+             [ "${{ needs.attempt9.outputs.success }}" = "1" ] || \
+             [ "${{ needs.attempt10.outputs.success }}" = "1" ]; then
             echo "At least one attempt succeeded."
             exit 0
           fi
