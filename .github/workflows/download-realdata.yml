@@ -34,6 +34,9 @@ env:
   MONTH_SLEEP: "2"
   CATEGORY_SLEEP: "5"
   JITTER_SLEEP: "1.5"
+  CURRENT_MONTH_DELAY_DAYS: "0"
+  CURRENT_MONTH_CLICK_RETRY_MAX: "3"
+  ALLOW_EMPTY_CURRENT_MONTH: "1"
 
 jobs:
   attempt1:
@@ -49,6 +52,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Preflight MOLIT access
+        id: preflight
+        continue-on-error: true
         shell: bash
         run: |
           python - <<'PY'
@@ -83,9 +88,12 @@ jobs:
               sys.exit(1)
           PY
       - name: Run downloader
+        id: downloader
+        if: steps.preflight.outcome == 'success'
         shell: bash
         run: python download_realdata.py
       - name: Mark success
+        if: steps.downloader.outcome == 'success'
         id: mark_success
         shell: bash
         run: echo "success=1" >> "$GITHUB_OUTPUT"
@@ -114,6 +122,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Preflight MOLIT access
+        id: preflight
+        continue-on-error: true
         shell: bash
         run: |
           python - <<'PY'
@@ -148,9 +158,12 @@ jobs:
               sys.exit(1)
           PY
       - name: Run downloader
+        id: downloader
+        if: steps.preflight.outcome == 'success'
         shell: bash
         run: python download_realdata.py
       - name: Mark success
+        if: steps.downloader.outcome == 'success'
         id: mark_success
         shell: bash
         run: echo "success=1" >> "$GITHUB_OUTPUT"
@@ -179,6 +192,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Preflight MOLIT access
+        id: preflight
+        continue-on-error: true
         shell: bash
         run: |
           python - <<'PY'
@@ -213,9 +228,12 @@ jobs:
               sys.exit(1)
           PY
       - name: Run downloader
+        id: downloader
+        if: steps.preflight.outcome == 'success'
         shell: bash
         run: python download_realdata.py
       - name: Mark success
+        if: steps.downloader.outcome == 'success'
         id: mark_success
         shell: bash
         run: echo "success=1" >> "$GITHUB_OUTPUT"
@@ -244,6 +262,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Preflight MOLIT access
+        id: preflight
+        continue-on-error: true
         shell: bash
         run: |
           python - <<'PY'
@@ -278,9 +298,12 @@ jobs:
               sys.exit(1)
           PY
       - name: Run downloader
+        id: downloader
+        if: steps.preflight.outcome == 'success'
         shell: bash
         run: python download_realdata.py
       - name: Mark success
+        if: steps.downloader.outcome == 'success'
         id: mark_success
         shell: bash
         run: echo "success=1" >> "$GITHUB_OUTPUT"
@@ -309,6 +332,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Preflight MOLIT access
+        id: preflight
+        continue-on-error: true
         shell: bash
         run: |
           python - <<'PY'
@@ -343,9 +368,12 @@ jobs:
               sys.exit(1)
           PY
       - name: Run downloader
+        id: downloader
+        if: steps.preflight.outcome == 'success'
         shell: bash
         run: python download_realdata.py
       - name: Mark success
+        if: steps.downloader.outcome == 'success'
         id: mark_success
         shell: bash
         run: echo "success=1" >> "$GITHUB_OUTPUT"
@@ -374,6 +402,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Preflight MOLIT access
+        id: preflight
+        continue-on-error: true
         shell: bash
         run: |
           python - <<'PY'
@@ -408,9 +438,12 @@ jobs:
               sys.exit(1)
           PY
       - name: Run downloader
+        id: downloader
+        if: steps.preflight.outcome == 'success'
         shell: bash
         run: python download_realdata.py
       - name: Mark success
+        if: steps.downloader.outcome == 'success'
         id: mark_success
         shell: bash
         run: echo "success=1" >> "$GITHUB_OUTPUT"
@@ -439,6 +472,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Preflight MOLIT access
+        id: preflight
+        continue-on-error: true
         shell: bash
         run: |
           python - <<'PY'
@@ -473,9 +508,12 @@ jobs:
               sys.exit(1)
           PY
       - name: Run downloader
+        id: downloader
+        if: steps.preflight.outcome == 'success'
         shell: bash
         run: python download_realdata.py
       - name: Mark success
+        if: steps.downloader.outcome == 'success'
         id: mark_success
         shell: bash
         run: echo "success=1" >> "$GITHUB_OUTPUT"
@@ -504,6 +542,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Preflight MOLIT access
+        id: preflight
+        continue-on-error: true
         shell: bash
         run: |
           python - <<'PY'
@@ -538,9 +578,12 @@ jobs:
               sys.exit(1)
           PY
       - name: Run downloader
+        id: downloader
+        if: steps.preflight.outcome == 'success'
         shell: bash
         run: python download_realdata.py
       - name: Mark success
+        if: steps.downloader.outcome == 'success'
         id: mark_success
         shell: bash
         run: echo "success=1" >> "$GITHUB_OUTPUT"
@@ -569,6 +612,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Preflight MOLIT access
+        id: preflight
+        continue-on-error: true
         shell: bash
         run: |
           python - <<'PY'
@@ -603,9 +648,12 @@ jobs:
               sys.exit(1)
           PY
       - name: Run downloader
+        id: downloader
+        if: steps.preflight.outcome == 'success'
         shell: bash
         run: python download_realdata.py
       - name: Mark success
+        if: steps.downloader.outcome == 'success'
         id: mark_success
         shell: bash
         run: echo "success=1" >> "$GITHUB_OUTPUT"
@@ -634,6 +682,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Preflight MOLIT access
+        id: preflight
+        continue-on-error: true
         shell: bash
         run: |
           python - <<'PY'
@@ -668,9 +718,12 @@ jobs:
               sys.exit(1)
           PY
       - name: Run downloader
+        id: downloader
+        if: steps.preflight.outcome == 'success'
         shell: bash
         run: python download_realdata.py
       - name: Mark success
+        if: steps.downloader.outcome == 'success'
         id: mark_success
         shell: bash
         run: echo "success=1" >> "$GITHUB_OUTPUT"
